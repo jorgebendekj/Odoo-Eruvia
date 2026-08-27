@@ -1,10 +1,12 @@
 odoo.eruviabs.com {
     encode gzip zstd
 
-    # Remote MCP Endpoints (SSE y Mensajes)
+    # Remote MCP & OAuth Endpoints para Claude Web y Móvil
     @mcp {
         path /sse*
         path /messages*
+        path /oauth*
+        path /.well-known*
     }
     reverse_proxy @mcp remote_mcp:8000
 
