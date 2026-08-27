@@ -1,17 +1,13 @@
 import os
-import uuid
 import secrets
-import base64
 import datetime
 import contextvars
 import xmlrpc.client
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Form, Depends, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from fastapi.middleware.cors import CORSMiddleware
 from mcp.server.fastmcp import FastMCP
-import uvicorn
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 load_dotenv()
 
@@ -26,6 +22,15 @@ OAUTH_TOKENS: Dict[str, Dict[str, Any]] = {}
 current_user_email = contextvars.ContextVar("current_user_email", default="info@eruviabs.com")
 current_user_password = contextvars.ContextVar("current_user_password", default="Eruvia2026!")
 
+# Servidor Oficial FastMCP de Anthropic con host 0.0.0.0 y puerto 8000
+mcp = FastMCP(
+    "Eruvia Business School ERP & CRM",
+    host="0.0.0.0",
+    port=8000
+)
+mcp.settings.host = "0.0.0.0"
+mcp.settings.port = 8000
+
 def get_odoo():
     """Obtiene el UID y proxy de modelos de Odoo autenticando con el usuario actual de la sesión."""
     email = current_user_email.get()
@@ -36,9 +41,6 @@ def get_odoo():
         raise PermissionError(f"Credenciales de Odoo inválidas para {email}")
     models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object", allow_none=True)
     return uid, models, password
-
-# Servidor Oficial FastMCP de Anthropic
-mcp = FastMCP("Eruvia Business School ERP & CRM")
 
 # ==============================================================================
 # 1. HERRAMIENTAS MCP (CRM, VENTAS, GASTOS Y CONTABILIDAD)
@@ -233,24 +235,14 @@ def execute_odoo(model: str, method: str, args: List[Any] = [], kwargs: Dict[str
     return models.execute_kw(ODOO_DB, uid, password, model, method, args, kwargs)
 
 # ==============================================================================
-# SERVIDOR FASTAPI CON PROTOCOLO OAUTH 2.0 COMPLETO
+# ENDPOINTS NATIVOS OAUTH 2.0 (VIA @mcp.custom_route)
 # ==============================================================================
 
-app = FastAPI(title="Eruvia MCP & OAuth 2.0 Server")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# 1. Metadatos OAuth 2.0 para descubrimiento automático de Claude
-@app.get("/.well-known/oauth-authorization-server")
-@app.get("/.well-known/openid-configuration")
-async def oauth_discovery():
-    return {
+# 1. Metadatos de descubrimiento de Servidor de Autorización
+@mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET"])
+@mcp.custom_route("/.well-known/openid-configuration", methods=["GET"])
+async def oauth_discovery(request: Request):
+    return JSONResponse({
         "issuer": "https://odoo.eruviabs.com",
         "authorization_endpoint": "https://odoo.eruviabs.com/oauth/authorize",
         "token_endpoint": "https://odoo.eruviabs.com/oauth/token",
@@ -260,23 +252,22 @@ async def oauth_discovery():
         "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic", "none"],
         "code_challenge_methods_supported": ["S256", "plain"],
         "scopes_supported": ["mcp", "openid", "profile", "email"]
-    }
+    })
 
-# 1.1 Metadatos Protected Resource (RFC 9207)
-@app.get("/.well-known/oauth-protected-resource")
-@app.get("/.well-known/oauth-protected-resource/mcp")
-@app.get("/.well-known/oauth-protected-resource/{path:path}")
-async def protected_resource():
-    return {
+# 2. Metadatos de Recurso Protegido (RFC 9207)
+@mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])
+@mcp.custom_route("/.well-known/oauth-protected-resource/mcp", methods=["GET"])
+async def protected_resource(request: Request):
+    return JSONResponse({
         "resource": "https://odoo.eruviabs.com/mcp",
         "authorization_servers": ["https://odoo.eruviabs.com"],
         "scopes_supported": ["mcp", "openid", "profile", "email"],
         "bearer_methods_supported": ["header"],
         "resource_documentation": "https://odoo.eruviabs.com"
-    }
+    })
 
-# 2. Registro dinámico de cliente (RFC 7591)
-@app.post("/oauth/register")
+# 3. Registro dinámico de cliente (RFC 7591)
+@mcp.custom_route("/oauth/register", methods=["POST"])
 async def oauth_register(request: Request):
     try:
         data = await request.json()
@@ -292,7 +283,6 @@ async def oauth_register(request: Request):
         ])
     })
 
-# 3. Pantalla de inicio de sesión OAuth para el funcionario
 LOGIN_HTML = """
 <!DOCTYPE html>
 <html lang="es">
@@ -341,31 +331,30 @@ LOGIN_HTML = """
 </html>
 """
 
-@app.get("/oauth/authorize", response_class=HTMLResponse)
-async def oauth_authorize_get(
-    request: Request,
-    client_id: str = "claude_connector_eruvia",
-    redirect_uri: str = "https://claude.ai/api/mcp/auth_callback",
-    state: str = "",
-    response_type: str = "code"
-):
-    html = LOGIN_HTML.replace("{ERROR_BLOCK}", "")\
-                     .replace("{REDIRECT_URI}", redirect_uri)\
-                     .replace("{STATE}", state)\
-                     .replace("{CLIENT_ID}", client_id)\
-                     .replace("{EMAIL_VAL}", "")
-    return HTMLResponse(content=html)
+# 4. Autorización OAuth GET y POST
+@mcp.custom_route("/oauth/authorize", methods=["GET", "POST"])
+async def oauth_authorize(request: Request):
+    if request.method == "GET":
+        params = request.query_params
+        redirect_uri = params.get("redirect_uri", "https://claude.ai/api/mcp/auth_callback")
+        state = params.get("state", "")
+        client_id = params.get("client_id", "claude_connector_eruvia")
+        html = LOGIN_HTML.replace("{ERROR_BLOCK}", "")\
+                         .replace("{REDIRECT_URI}", redirect_uri)\
+                         .replace("{STATE}", state)\
+                         .replace("{CLIENT_ID}", client_id)\
+                         .replace("{EMAIL_VAL}", "")
+        return HTMLResponse(content=html)
 
-@app.post("/oauth/authorize", response_class=HTMLResponse)
-async def oauth_authorize_post(
-    request: Request,
-    email: str = Form(...),
-    password: str = Form(...),
-    redirect_uri: str = Form("https://claude.ai/api/mcp/auth_callback"),
-    state: str = Form(""),
-    client_id: str = Form("claude_connector_eruvia")
-):
-    # Validar credenciales directamente en Odoo
+    # POST Form Submission
+    form = await request.form()
+    email = form.get("email", "").strip()
+    password = form.get("password", "").strip()
+    redirect_uri = form.get("redirect_uri", "https://claude.ai/api/mcp/auth_callback")
+    state = form.get("state", "")
+    client_id = form.get("client_id", "claude_connector_eruvia")
+
+    # Validar directamente en Odoo
     common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
     try:
         uid = common.authenticate(ODOO_DB, email, password, {})
@@ -378,7 +367,7 @@ async def oauth_authorize_post(
                              .replace("{EMAIL_VAL}", email)
             return HTMLResponse(content=html, status_code=400)
     except Exception as e:
-        err_html = f'<div class="error">❌ Error conectando al ERP de Odoo: {str(e)}</div>'
+        err_html = f'<div class="error">❌ Error comunicando con Odoo: {str(e)}</div>'
         html = LOGIN_HTML.replace("{ERROR_BLOCK}", err_html)\
                          .replace("{REDIRECT_URI}", redirect_uri)\
                          .replace("{STATE}", state)\
@@ -386,7 +375,7 @@ async def oauth_authorize_post(
                          .replace("{EMAIL_VAL}", email)
         return HTMLResponse(content=html, status_code=500)
 
-    # Generar código de autorización y guardar credenciales
+    # Guardar autorización
     code = secrets.token_urlsafe(32)
     OAUTH_CODES[code] = {
         "email": email,
@@ -395,13 +384,12 @@ async def oauth_authorize_post(
         "expires_at": datetime.datetime.now() + datetime.timedelta(minutes=10)
     }
 
-    # Redirigir a Claude con el código aprobado
     sep = "&" if "?" in redirect_uri else "?"
     callback_url = f"{redirect_uri}{sep}code={code}&state={state}"
     return RedirectResponse(url=callback_url, status_code=302)
 
-# 4. Emisión de Access Token OAuth
-@app.post("/oauth/token")
+# 5. Emisión de Token OAuth
+@mcp.custom_route("/oauth/token", methods=["POST"])
 async def oauth_token(request: Request):
     form_data = {}
     content_type = request.headers.get("content-type", "")
@@ -442,42 +430,5 @@ async def oauth_token(request: Request):
         "scope": "mcp"
     })
 
-# ==============================================================================
-# PROCESAMIENTO DIRECTO SIN REDIRECTS PARA /mcp
-# ==============================================================================
-
-mcp_http = mcp.streamable_http_app()
-mcp_sse = mcp.sse_app()
-
-@app.middleware("http")
-async def extract_oauth_user_middleware(request: Request, call_next):
-    auth_header = request.headers.get("Authorization", "")
-    token = None
-    if auth_header.startswith("Bearer "):
-        token = auth_header.split("Bearer ")[-1].strip()
-
-    if token and token in OAUTH_TOKENS:
-        user_info = OAUTH_TOKENS[token]
-        current_user_email.set(user_info["email"])
-        current_user_password.set(user_info["password"])
-    elif request.headers.get("x-odoo-email") and request.headers.get("x-odoo-password"):
-        current_user_email.set(request.headers.get("x-odoo-email"))
-        current_user_password.set(request.headers.get("x-odoo-password"))
-
-    return await call_next(request)
-
-# Despachar directamente /mcp sin emitir 307 Redirects
-@app.api_route("/mcp", methods=["GET", "POST", "HEAD", "OPTIONS", "DELETE", "PUT"])
-@app.api_route("/mcp/{path:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "DELETE", "PUT"])
-async def handle_mcp_raw(request: Request, path: str = ""):
-    # Modificar el scope para que apunte a /mcp dentro del FastMCP ASGI app
-    scope = dict(request.scope)
-    scope["path"] = "/mcp"
-    scope["raw_path"] = b"/mcp"
-    return await mcp_http(scope, request.receive, request._send)
-
-app.mount("/sse", mcp_sse)
-app.mount("/messages", mcp_sse)
-
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    mcp.run(transport="streamable-http")
