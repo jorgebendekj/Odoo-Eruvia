@@ -50,6 +50,65 @@ services:
     networks:
       - eruvia_net
 
+  redis:
+    image: redis:7-alpine
+    container_name: eruvia_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - eruvia_net
+
+  evolution_api:
+    image: atendai/evolution-api:v2.1.2
+    container_name: eruvia_evolution_api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - SERVER_URL=http://157.245.249.151:8080
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:-eruvia_secret_token_2026}
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://redis:6379/1
+      - CACHE_REDIS_PREFIX_KEY=evolution
+      - DATABASE_ENABLED=false
+      - WEBHOOK_GLOBAL_ENABLED=true
+      - WEBHOOK_GLOBAL_URL=http://bot:5000/webhook/evolution
+      - WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS=false
+      - WEBHOOK_EVENTS_APPLICATION_STARTUP=false
+      - WEBHOOK_EVENTS_QRCODE_UPDATED=true
+      - WEBHOOK_EVENTS_MESSAGES_UPSERT=true
+    volumes:
+      - evolution_instances:/evolution/instances
+    depends_on:
+      - redis
+    networks:
+      - eruvia_net
+
+  bot:
+    build:
+      context: ./whatsapp-bot
+      dockerfile: Dockerfile
+    container_name: eruvia_bot
+    restart: unless-stopped
+    environment:
+      - ODOO_URL=http://odoo:8069
+      - ODOO_DB=eruvia
+      - ODOO_USERNAME=admin
+      - ODOO_PASSWORD=${ODOO_ADMIN_PASSWORD:-admin}
+      - EVOLUTION_URL=http://evolution_api:8080
+      - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-eruvia_secret_token_2026}
+      - EVOLUTION_INSTANCE=eruvia
+      - AI_BASE_URL=${AI_BASE_URL:-https://api.moonshot.cn/v1}
+      - AI_API_KEY=${AI_API_KEY}
+      - AI_MODEL=${AI_MODEL:-moonshot-v1-8k}
+    depends_on:
+      - odoo
+      - evolution_api
+    networks:
+      - eruvia_net
+
 networks:
   eruvia_net:
     driver: bridge
@@ -59,3 +118,5 @@ volumes:
   db_data:
   caddy_data:
   caddy_config:
+  redis_data:
+  evolution_instances:
