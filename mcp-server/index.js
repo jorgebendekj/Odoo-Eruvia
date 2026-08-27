@@ -14,7 +14,6 @@ const ODOO_DB = process.env.ODOO_DB || "eruvia";
 const ODOO_USERNAME = process.env.ODOO_USERNAME || "info@eruviabs.com";
 const ODOO_API_KEY = process.env.ODOO_API_KEY || "Eruvia2026!";
 
-// Determinar si la conexión es HTTPS o HTTP
 const isHttps = ODOO_URL.startsWith("https://");
 const urlObj = new URL(ODOO_URL);
 const host = urlObj.hostname;
@@ -81,6 +80,36 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
+        name: "create_expense",
+        description: "Registra un gasto o egreso empresarial en Odoo (ej. nube, servidores, viajes, comidas, licencias) y lo contabiliza en el Estado de Resultados.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            supplier_name: { type: "string", description: "Nombre del proveedor o comercio (ej. 'DigitalOcean', 'Google Cloud', 'Restaurante Madrid')" },
+            description: { type: "string", description: "Concepto del gasto (ej. 'Servidor Cloud agosto', 'Almuerzo comercial')" },
+            amount: { type: "number", description: "Importe en euros (ej. 12.00)" },
+            category: { type: "string", description: "Categoría del gasto (ej. 'Nube / Servidores', 'Marketing', 'Comercial')" },
+            date: { type: "string", description: "Fecha en formato YYYY-MM-DD (opcional)" }
+          },
+          required: ["supplier_name", "description", "amount"]
+        }
+      },
+      {
+        name: "get_financial_summary",
+        description: "Obtiene un resumen financiero de Eruvia (Total ingresos facturados, gastos y margen neto).",
+        inputSchema: { type: "object", properties: {} }
+      },
+      {
+        name: "list_expenses",
+        description: "Lista los últimos egresos o facturas de proveedores registrados en Eruvia.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            limit: { type: "number", description: "Número de egresos a listar" }
+          }
+        }
+      },
+      {
         name: "search_leads",
         description: "Busca oportunidades o leads en el CRM de Eruvia European Business School.",
         inputSchema: {
@@ -93,16 +122,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "create_lead",
-        description: "Crea una nueva oportunidad en el CRM de Eruvia (ej. alumno interesado en máster o empresa).",
+        description: "Crea una nueva oportunidad en el CRM de Eruvia (ej. venta de cursos, masters, clientes B2B).",
         inputSchema: {
           type: "object",
           properties: {
-            name: { type: "string", description: "Título de la oportunidad (ej. 'Máster Dirección Comercial - Laura Gómez')" },
-            contact_name: { type: "string", description: "Nombre completo de la persona" },
+            name: { type: "string", description: "Título de la oportunidad (ej. 'Venta 3 Cursos - Gmasivos')" },
+            contact_name: { type: "string", description: "Nombre del contacto o empresa" },
             email: { type: "string", description: "Email de contacto" },
             phone: { type: "string", description: "Teléfono móvil o WhatsApp" },
             expected_revenue: { type: "number", description: "Importe estimado en euros" },
-            notes: { type: "string", description: "Notas o detalles de la solicitud" }
+            notes: { type: "string", description: "Notas o detalles de los cursos" }
           },
           required: ["name"]
         }
@@ -151,14 +180,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "execute_odoo",
-        description: "Herramienta universal de acceso al ERP. Permite ejecutar cualquier método ORM (search_read, create, write, etc.) sobre cualquier modelo de Odoo.",
+        description: "Herramienta universal de acceso al ERP. Permite ejecutar cualquier método ORM sobre cualquier modelo de Odoo.",
         inputSchema: {
           type: "object",
           properties: {
             model: { type: "string", description: "Modelo en Odoo (ej. 'crm.lead', 'res.partner', 'sale.order')" },
             method: { type: "string", description: "Método ORM a ejecutar (ej. 'search_read', 'create', 'write')" },
             args: { type: "array", description: "Argumentos posicionales" },
-            kwargs: { type: "object", description: "Argumentos nombrados (ej. { fields: ['name', 'email'] })" }
+            kwargs: { type: "object", description: "Argumentos nombrados" }
           },
           required: ["model", "method"]
         }
@@ -170,6 +199,89 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
   try {
+    if (name === "create_expense") {
+      const supplierName = args.supplier_name;
+      const description = args.description;
+      const amount = args.amount;
+      const category = args.category || "Gastos Generales";
+      const date = args.date || new Date().toISOString().split("T")[0];
+
+      // Buscar o crear proveedor
+      const partnerIds = await executeKw("res.partner", "search", [[["name", "ilike", supplierName]]], { limit: 1 });
+      let partnerId;
+      if (partnerIds && partnerIds.length > 0) {
+        partnerId = partnerIds[0];
+      } else {
+        partnerId = await executeKw("res.partner", "create", [{
+          name: supplierName,
+          is_company: true,
+          supplier_rank: 1,
+          comment: `Proveedor registrado vía Claude MCP (${category})`
+        }]);
+      }
+
+      // Buscar cuenta de gastos
+      const accountIds = await executeKw("account.account", "search", [[["account_type", "=", "expense"]]], { limit: 1 });
+      const accountId = accountIds && accountIds.length > 0 ? accountIds[0] : null;
+
+      const lineVals = {
+        name: `[${category}] ${description}`,
+        quantity: 1,
+        price_unit: amount
+      };
+      if (accountId) lineVals.account_id = accountId;
+
+      const invoiceVals = {
+        move_type: "in_invoice",
+        partner_id: partnerId,
+        invoice_date: date,
+        ref: `Claude MCP: ${category}`,
+        invoice_line_ids: [[0, 0, lineVals]]
+      };
+
+      const moveId = await executeKw("account.move", "create", [invoiceVals]);
+      try {
+        await executeKw("account.move", "action_post", [[moveId]]);
+      } catch (e) {}
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ status: "success", expense_id: moveId, supplier: supplierName, amount, date, category }, null, 2)
+        }]
+      };
+    }
+
+    if (name === "get_financial_summary") {
+      const invoices = await executeKw("account.move", "search_read", [[["move_type", "=", "out_invoice"], ["state", "=", "posted"]]], { fields: ["amount_total"] });
+      const bills = await executeKw("account.move", "search_read", [[["move_type", "=", "in_invoice"], ["state", "=", "posted"]]], { fields: ["amount_total"] });
+      const income = (invoices || []).reduce((acc, cur) => acc + (cur.amount_total || 0), 0);
+      const expenses = (bills || []).reduce((acc, cur) => acc + (cur.amount_total || 0), 0);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            company: "Eruvia European Business School",
+            total_income_euros: Math.round(income * 100) / 100,
+            total_expenses_euros: Math.round(expenses * 100) / 100,
+            net_profit_euros: Math.round((income - expenses) * 100) / 100,
+            invoices_count: invoices.length,
+            bills_count: bills.length
+          }, null, 2)
+        }]
+      };
+    }
+
+    if (name === "list_expenses") {
+      const limit = args?.limit || 10;
+      const bills = await executeKw("account.move", "search_read", [[["move_type", "=", "in_invoice"]]], {
+        fields: ["id", "name", "partner_id", "invoice_date", "amount_total", "state", "ref"],
+        limit,
+        order: "invoice_date desc, id desc"
+      });
+      return { content: [{ type: "text", text: JSON.stringify(bills, null, 2) }] };
+    }
+
     if (name === "search_leads") {
       const query = args?.query || "";
       const limit = args?.limit || 10;
@@ -190,7 +302,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         type: "opportunity"
       };
       const leadId = await executeKw("crm.lead", "create", [values]);
-      return { content: [{ type: "text", text: `Oportunidad creada exitosamente con ID: ${leadId}` }] };
+      return { content: [{ type: "text", text: JSON.stringify({ status: "success", lead_id: leadId, message: `Oportunidad creada exitosamente en Odoo con ID: ${leadId}` }) }] };
     }
 
     if (name === "update_lead") {
@@ -199,7 +311,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (args.expected_revenue !== undefined) values.expected_revenue = args.expected_revenue;
       if (args.notes !== undefined) values.description = args.notes;
       const success = await executeKw("crm.lead", "write", [[args.lead_id], values]);
-      return { content: [{ type: "text", text: `Oportunidad ID ${args.lead_id} actualizada: ${success}` }] };
+      return { content: [{ type: "text", text: JSON.stringify({ status: "success", lead_id: args.lead_id, updated: success }) }] };
     }
 
     if (name === "search_contacts") {
@@ -223,7 +335,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         city: args.city
       };
       const contactId = await executeKw("res.partner", "create", [values]);
-      return { content: [{ type: "text", text: `Contacto creado con ID: ${contactId}` }] };
+      return { content: [{ type: "text", text: JSON.stringify({ status: "success", contact_id: contactId }) }] };
     }
 
     if (name === "execute_odoo") {
