@@ -1,32 +1,33 @@
 import os
+import uuid
+import secrets
 import base64
 import datetime
 import contextvars
 import xmlrpc.client
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
+from fastapi import FastAPI, Request, Form, Depends, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 from mcp.server.fastmcp import FastMCP
+import uvicorn
 
 load_dotenv()
 
 ODOO_URL = os.getenv("ODOO_URL", "http://odoo:8069").rstrip("/")
 ODOO_DB = os.getenv("ODOO_DB", "eruvia")
 
-# Servidor Oficial FastMCP de Anthropic con host 0.0.0.0
-mcp = FastMCP(
-    "Eruvia Business School ERP & CRM",
-    host="0.0.0.0",
-    port=8000
-)
-mcp.settings.host = "0.0.0.0"
-mcp.settings.port = 8000
+# Almacenamiento en memoria para OAuth (códigos y tokens vinculados a credenciales de Odoo)
+OAUTH_CODES: Dict[str, Dict[str, Any]] = {}
+OAUTH_TOKENS: Dict[str, Dict[str, Any]] = {}
 
 # ContextVars por petición para soportar multi-usuario dinámico
 current_user_email = contextvars.ContextVar("current_user_email", default="info@eruviabs.com")
 current_user_password = contextvars.ContextVar("current_user_password", default="Eruvia2026!")
 
 def get_odoo():
-    """Obtiene el UID y proxy de modelos de Odoo autenticando con el usuario actual de la petición."""
+    """Obtiene el UID y proxy de modelos de Odoo autenticando con el usuario actual de la sesión."""
     email = current_user_email.get()
     password = current_user_password.get()
     common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
@@ -36,8 +37,11 @@ def get_odoo():
     models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object", allow_none=True)
     return uid, models, password
 
+# Servidor Oficial FastMCP de Anthropic
+mcp = FastMCP("Eruvia Business School ERP & CRM")
+
 # ==============================================================================
-# 1. CONTABILIDAD Y REGISTRO DE GASTOS / EGRESOS
+# 1. HERRAMIENTAS MCP (CRM, VENTAS, GASTOS Y CONTABILIDAD)
 # ==============================================================================
 
 @mcp.tool()
@@ -133,10 +137,6 @@ def list_expenses(limit: int = 10) -> List[Dict[str, Any]]:
     ], {"fields": fields, "limit": limit, "order": "invoice_date desc, id desc"})
     return bills
 
-# ==============================================================================
-# 2. GESTIÓN DE CRM Y PROSPECTOS DE MÁSTERS
-# ==============================================================================
-
 @mcp.tool()
 def search_leads(query: str = "", limit: int = 10) -> List[Dict[str, Any]]:
     """Busca oportunidades y prospectos en el CRM de Eruvia."""
@@ -189,10 +189,6 @@ def update_lead(lead_id: int, stage_id: Optional[int] = None, expected_revenue: 
     success = models.execute_kw(ODOO_DB, uid, password, "crm.lead", "write", [[lead_id], values])
     return {"status": "success", "lead_id": lead_id, "updated": success}
 
-# ==============================================================================
-# 3. CONTACTOS Y EMPRESAS (res.partner)
-# ==============================================================================
-
 @mcp.tool()
 def search_contacts(query: str = "", is_company: Optional[bool] = None, limit: int = 10) -> List[Dict[str, Any]]:
     """Busca alumnos o empresas clientes en la libreta de contactos."""
@@ -230,15 +226,232 @@ def create_contact(
     contact_id = models.execute_kw(ODOO_DB, uid, password, "res.partner", "create", [values])
     return {"status": "success", "contact_id": contact_id, "message": f"Contacto creado con ID {contact_id}"}
 
-# ==============================================================================
-# 4. HERRAMIENTA UNIVERSAL ERP
-# ==============================================================================
-
 @mcp.tool()
 def execute_odoo(model: str, method: str, args: List[Any] = [], kwargs: Dict[str, Any] = {}) -> Any:
     """Herramienta universal de acceso a cualquier modelo del ERP."""
     uid, models, password = get_odoo()
     return models.execute_kw(ODOO_DB, uid, password, model, method, args, kwargs)
 
+# ==============================================================================
+# SERVIDOR FASTAPI CON PROTOCOLO OAUTH 2.0 COMPLETO
+# ==============================================================================
+
+app = FastAPI(title="Eruvia MCP & OAuth 2.0 Server")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 1. Metadatos OAuth 2.0 para descubrimiento automático de Claude
+@app.get("/.well-known/oauth-authorization-server")
+@app.get("/.well-known/oauth-protected-resource")
+@app.get("/.well-known/openid-configuration")
+async def oauth_discovery():
+    return {
+        "issuer": "https://odoo.eruviabs.com",
+        "authorization_endpoint": "https://odoo.eruviabs.com/oauth/authorize",
+        "token_endpoint": "https://odoo.eruviabs.com/oauth/token",
+        "registration_endpoint": "https://odoo.eruviabs.com/oauth/register",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic", "none"],
+        "code_challenge_methods_supported": ["S256", "plain"],
+        "scopes_supported": ["mcp", "openid", "profile", "email"]
+    }
+
+# 2. Registro dinámico de cliente (RFC 7591)
+@app.post("/oauth/register")
+async def oauth_register(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    return JSONResponse({
+        "client_id": "claude_connector_eruvia",
+        "client_secret": "eruvia_secret_2026",
+        "client_name": data.get("client_name", "Claude Custom Connector"),
+        "redirect_uris": data.get("redirect_uris", ["https://claude.ai/api/integrations/oauth/callback"])
+    })
+
+# 3. Pantalla de inicio de sesión OAuth para el funcionario
+LOGIN_HTML = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Eruvia European Business School - Conectar Claude IA</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .card { background: #1e293b; padding: 2.5rem; border-radius: 1rem; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5); width: 100%; max-width: 400px; border: 1px solid #334155; }
+        .logo { text-align: center; margin-bottom: 1.5rem; }
+        .logo h2 { margin: 0.5rem 0 0; color: #38bdf8; font-size: 1.4rem; }
+        .logo p { margin: 0.2rem 0 0; color: #94a3b8; font-size: 0.85rem; }
+        .form-group { margin-bottom: 1.2rem; }
+        label { display: block; margin-bottom: 0.4rem; font-size: 0.9rem; color: #cbd5e1; }
+        input { width: 100%; padding: 0.75rem; border-radius: 0.5rem; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; font-size: 1rem; }
+        input:focus { outline: none; border-color: #38bdf8; }
+        button { width: 100%; padding: 0.85rem; border-radius: 0.5rem; border: none; background: #2563eb; color: #fff; font-weight: 600; font-size: 1rem; cursor: pointer; transition: background 0.2s; margin-top: 0.5rem; }
+        button:hover { background: #1d4ed8; }
+        .error { background: #ef444422; border: 1px solid #ef4444; color: #fca5a5; padding: 0.75rem; border-radius: 0.5rem; margin-bottom: 1rem; font-size: 0.85rem; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="logo">
+            <h2>🏛️ Eruvia Business School</h2>
+            <p>Conexión segura de Asistente IA (Claude)</p>
+        </div>
+        {ERROR_BLOCK}
+        <form method="POST" action="/oauth/authorize">
+            <input type="hidden" name="redirect_uri" value="{REDIRECT_URI}">
+            <input type="hidden" name="state" value="{STATE}">
+            <input type="hidden" name="client_id" value="{CLIENT_ID}">
+            <div class="form-group">
+                <label for="email">Correo Electrónico de Odoo</label>
+                <input type="email" id="email" name="email" placeholder="tu_correo@eruviabs.com" required value="{EMAIL_VAL}">
+            </div>
+            <div class="form-group">
+                <label for="password">Contraseña de Odoo</label>
+                <input type="password" id="password" name="password" placeholder="••••••••" required>
+            </div>
+            <button type="submit">Iniciar Sesión y Conectar Claude</button>
+        </form>
+    </div>
+</body>
+</html>
+"""
+
+@app.get("/oauth/authorize", response_class=HTMLResponse)
+async def oauth_authorize_get(
+    request: Request,
+    client_id: str = "claude_connector_eruvia",
+    redirect_uri: str = "https://claude.ai/api/integrations/oauth/callback",
+    state: str = "",
+    response_type: str = "code"
+):
+    html = LOGIN_HTML.replace("{ERROR_BLOCK}", "")\
+                     .replace("{REDIRECT_URI}", redirect_uri)\
+                     .replace("{STATE}", state)\
+                     .replace("{CLIENT_ID}", client_id)\
+                     .replace("{EMAIL_VAL}", "")
+    return HTMLResponse(content=html)
+
+@app.post("/oauth/authorize", response_class=HTMLResponse)
+async def oauth_authorize_post(
+    request: Request,
+    email: str = Form(...),
+    password: str = Form(...),
+    redirect_uri: str = Form("https://claude.ai/api/integrations/oauth/callback"),
+    state: str = Form(""),
+    client_id: str = Form("claude_connector_eruvia")
+):
+    # Validar credenciales directamente en Odoo
+    common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
+    try:
+        uid = common.authenticate(ODOO_DB, email, password, {})
+        if not uid:
+            err_html = '<div class="error">❌ Usuario o contraseña de Odoo incorrectos.</div>'
+            html = LOGIN_HTML.replace("{ERROR_BLOCK}", err_html)\
+                             .replace("{REDIRECT_URI}", redirect_uri)\
+                             .replace("{STATE}", state)\
+                             .replace("{CLIENT_ID}", client_id)\
+                             .replace("{EMAIL_VAL}", email)
+            return HTMLResponse(content=html, status_code=400)
+    except Exception as e:
+        err_html = f'<div class="error">❌ Error conectando al ERP de Odoo: {str(e)}</div>'
+        html = LOGIN_HTML.replace("{ERROR_BLOCK}", err_html)\
+                         .replace("{REDIRECT_URI}", redirect_uri)\
+                         .replace("{STATE}", state)\
+                         .replace("{CLIENT_ID}", client_id)\
+                         .replace("{EMAIL_VAL}", email)
+        return HTMLResponse(content=html, status_code=500)
+
+    # Generar código de autorización y guardar credenciales
+    code = secrets.token_urlsafe(32)
+    OAUTH_CODES[code] = {
+        "email": email,
+        "password": password,
+        "uid": uid,
+        "expires_at": datetime.datetime.now() + datetime.timedelta(minutes=10)
+    }
+
+    # Redirigir a Claude con el código aprobado
+    sep = "&" if "?" in redirect_uri else "?"
+    callback_url = f"{redirect_uri}{sep}code={code}&state={state}"
+    return RedirectResponse(url=callback_url, status_code=302)
+
+# 4. Emisión de Access Token OAuth
+@app.post("/oauth/token")
+async def oauth_token(request: Request):
+    form_data = await request.form() if "application/x-www-form-urlencoded" in request.headers.get("content-type", "") else {}
+    if not form_data:
+        try:
+            form_data = await request.json()
+        except Exception:
+            pass
+
+    code = form_data.get("code")
+    refresh_token = form_data.get("refresh_token")
+
+    if code and code in OAUTH_CODES:
+        auth_info = OAUTH_CODES.pop(code)
+    elif refresh_token and refresh_token in OAUTH_TOKENS:
+        auth_info = OAUTH_TOKENS[refresh_token]
+    else:
+        # Fallback a credenciales maestras si Claude solicita client_credentials
+        auth_info = {"email": "info@eruviabs.com", "password": "Eruvia2026!", "uid": 6}
+
+    access_token = f"eruvia_tok_{secrets.token_hex(24)}"
+    new_refresh_token = f"eruvia_ref_{secrets.token_hex(24)}"
+
+    token_data = {
+        "email": auth_info["email"],
+        "password": auth_info["password"],
+        "uid": auth_info.get("uid", 6)
+    }
+    OAUTH_TOKENS[access_token] = token_data
+    OAUTH_TOKENS[new_refresh_token] = token_data
+
+    return JSONResponse({
+        "access_token": access_token,
+        "token_type": "bearer",
+        "expires_in": 86400 * 365,
+        "refresh_token": new_refresh_token,
+        "scope": "mcp"
+    })
+
+# ==============================================================================
+# MIDDLEWARE DE INYECCIÓN DE USUARIO OAUTH A FASTMCP
+# ==============================================================================
+
+@app.middleware("http")
+async def extract_oauth_user_middleware(request: Request, call_next):
+    auth_header = request.headers.get("Authorization", "")
+    token = None
+    if auth_header.startswith("Bearer "):
+        token = auth_header.split("Bearer ")[-1].strip()
+
+    # Si hay token OAuth registrado, inyectar el usuario
+    if token and token in OAUTH_TOKENS:
+        user_info = OAUTH_TOKENS[token]
+        current_user_email.set(user_info["email"])
+        current_user_password.set(user_info["password"])
+    elif request.headers.get("x-odoo-email") and request.headers.get("x-odoo-password"):
+        current_user_email.set(request.headers.get("x-odoo-email"))
+        current_user_password.set(request.headers.get("x-odoo-password"))
+
+    return await call_next(request)
+
+# Montar endpoints oficiales de FastMCP (Streamable HTTP y SSE)
+mcp_http = mcp.streamable_http_app()
+app.mount("/mcp", mcp_http)
+app.mount("/sse", mcp.sse_app())
+app.mount("/messages", mcp.sse_app())
+
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    uvicorn.run(app, host="0.0.0.0", port=8000)

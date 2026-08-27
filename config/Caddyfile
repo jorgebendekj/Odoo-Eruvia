@@ -1,7 +1,28 @@
 odoo.eruviabs.com {
     encode gzip zstd
 
-    # 1. Remote MCP Endpoints
+    # 1. OAuth 2.0 y Remote MCP Endpoints
+    handle /.well-known/oauth* {
+        reverse_proxy remote_mcp:8000 {
+            header_up Host {host}
+            header_up X-Forwarded-Proto https
+        }
+    }
+
+    handle /.well-known/openid* {
+        reverse_proxy remote_mcp:8000 {
+            header_up Host {host}
+            header_up X-Forwarded-Proto https
+        }
+    }
+
+    handle /oauth* {
+        reverse_proxy remote_mcp:8000 {
+            header_up Host {host}
+            header_up X-Forwarded-Proto https
+        }
+    }
+
     handle /mcp* {
         reverse_proxy remote_mcp:8000 {
             flush_interval -1
