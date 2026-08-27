@@ -3,11 +3,7 @@ import datetime
 import xmlrpc.client
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse
-from fastapi.middleware.cors import CORSMiddleware
 from fastmcp import FastMCP
-import uvicorn
 
 load_dotenv()
 
@@ -226,80 +222,15 @@ def create_contact(
     contact_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "create", [values])
     return {"status": "success", "contact_id": contact_id, "message": f"Contacto creado con ID {contact_id}"}
 
+# ==============================================================================
+# 4. HERRAMIENTA UNIVERSAL ERP
+# ==============================================================================
+
 @mcp.tool()
 def execute_odoo(model: str, method: str, args: List[Any] = [], kwargs: Dict[str, Any] = {}) -> Any:
     """Herramienta universal de acceso a cualquier modelo del ERP."""
     uid, models = get_odoo()
     return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, model, method, args, kwargs)
 
-# ==============================================================================
-# FASTAPI APP CON INTEGRACIÓN OAUTH 2.0 PARA CLAUDE WEB CONNECTORS
-# ==============================================================================
-
-app = FastAPI(title="Eruvia MCP & OAuth Bridge")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Endpoint de descubrimiento OAuth para Claude
-@app.get("/.well-known/oauth-authorization-server")
-@app.get("/.well-known/oauth-protected-resource")
-@app.get("/.well-known/openid-configuration")
-async def oauth_metadata():
-    return {
-        "issuer": "https://odoo.eruviabs.com",
-        "authorization_endpoint": "https://odoo.eruviabs.com/oauth/authorize",
-        "token_endpoint": "https://odoo.eruviabs.com/oauth/token",
-        "registration_endpoint": "https://odoo.eruviabs.com/oauth/register",
-        "response_types_supported": ["code", "token"],
-        "grant_types_supported": ["authorization_code", "client_credentials"],
-        "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic", "none"],
-        "scopes_supported": ["mcp", "read", "write"]
-    }
-
-# Registro dinámico de cliente OAuth (RFC 7591)
-@app.post("/oauth/register")
-async def oauth_register(request: Request):
-    data = await request.json() if request.headers.get("content-type") == "application/json" else {}
-    return JSONResponse({
-        "client_id": "eruvia_claude_client",
-        "client_secret": "eruvia_secret_2026",
-        "client_name": data.get("client_name", "Claude Web Connector"),
-        "redirect_uris": data.get("redirect_uris", ["https://claude.ai/api/integrations/oauth/callback"])
-    })
-
-# Autorización OAuth con auto-aprobación para Claude
-@app.get("/oauth/authorize")
-async def oauth_authorize(
-    response_type: str = "code",
-    client_id: str = "eruvia_claude_client",
-    redirect_uri: str = "https://claude.ai/api/integrations/oauth/callback",
-    state: str = "",
-    scope: str = "mcp"
-):
-    # Redirigir de vuelta a Claude con el código de autorización aprobado
-    sep = "&" if "?" in redirect_uri else "?"
-    target_url = f"{redirect_uri}{sep}code=eruvia_auth_code_ok&state={state}"
-    return RedirectResponse(url=target_url)
-
-# Emisión de Token OAuth
-@app.post("/oauth/token")
-async def oauth_token():
-    return JSONResponse({
-        "access_token": "eruvia_mcp_access_token_2026",
-        "token_type": "bearer",
-        "expires_in": 86400 * 365,
-        "scope": "mcp"
-    })
-
-# Montar el servidor FastMCP SSE dentro de la app FastAPI
-mcp_app = mcp._create_sse_app()
-app.mount("/", mcp_app)
-
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    mcp.run(transport="sse", host="0.0.0.0", port=8000)
