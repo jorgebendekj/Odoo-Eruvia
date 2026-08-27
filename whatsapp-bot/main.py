@@ -42,7 +42,7 @@ if KB_PATH.exists():
 # Memoria de conversación en memoria (últimos 10 mensajes por número)
 conversation_history: Dict[str, List[Dict[str, str]]] = {}
 
-# Estado de pausa en memoria
+# Set de números pausados manualmente
 paused_numbers: Dict[str, bool] = {}
 
 app = FastAPI(title="Eruvia WhatsApp AI Bot & Admissions Agent")
@@ -80,16 +80,18 @@ def check_human_intervention_needed(text: str) -> bool:
 
 def is_lead_paused_in_odoo(phone: str) -> bool:
     """
-    Verifica dinámicamente en Odoo CRM si el lead tiene la etiqueta 'Intervención Humana' o 'Bot Pausado'.
+    Verifica si en Odoo CRM el lead activo tiene la etiqueta 'Intervención Humana' o 'Bot Pausado'.
+    Si no existe la etiqueta en Odoo, el bot NO está pausado.
     """
     try:
         uid, models = get_odoo_client()
         if not uid:
-            return paused_numbers.get(phone, False)
+            return False
 
         clean_phone = re.sub(r"[^\d+]", "", phone)
         lead_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "search", [
-            ["|", ("phone", "ilike", clean_phone[-9:]), ("mobile", "ilike", clean_phone[-9:])]
+            ["|", ("phone", "ilike", clean_phone[-9:]), ("mobile", "ilike", clean_phone[-9:])],
+            ("probability", "<", 100)
         ], {"limit": 1})
 
         if lead_ids:
@@ -104,12 +106,12 @@ def is_lead_paused_in_odoo(phone: str) -> bool:
                             paused_numbers[phone] = True
                             return True
 
-                paused_numbers[phone] = False
-                return False
+        # Si no tiene etiquetas de pausa en Odoo, despausar
+        paused_numbers[phone] = False
+        return False
     except Exception as e:
         logger.error(f"Error verificando estado de pausa en Odoo: {e}")
-
-    return paused_numbers.get(phone, False)
+        return False
 
 def set_human_intervention_in_odoo(phone: str, sender_name: str, lead_id: int):
     """Marca la oportunidad en Odoo con etiqueta de Intervención Humana y alta prioridad."""
@@ -215,12 +217,6 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
 
 async def generate_ai_reply(phone: str, user_message: str) -> str:
     """Genera una respuesta inteligente y consultiva utilizando Kimi K3 de Moonshot AI."""
-    if not AI_API_KEY:
-        return (
-            "¡Hola! 👋 Qué gusto saludarte. Soy el asesor académico de Eruvia European Business School.\n\n"
-            "¿Cómo te puedo ayudar hoy? ¿Te gustaría conocer los detalles de nuestro MBA en Inteligencia Artificial o estás buscando potenciar algún área específica de tu carrera?"
-        )
-
     client = OpenAI(base_url=AI_BASE_URL, api_key=AI_API_KEY)
     
     system_prompt = f"""Eres el Asesor Académico y de Admisiones oficial de Eruvia European Business School (Your AI Native Business School, miembro de ANCYPEL).
@@ -233,7 +229,7 @@ ESTILO Y COMPORTAMIENTO:
 2. MULTILINGÜE: Responde siempre en el MISMO idioma que use el usuario (Español, Inglés, Portugués, Francés, etc.).
 3. FORMATO WHATSAPP: Respuestas claras y atractivas con viñetas o emojis sobrios. Evita respuestas excesivamente largas.
 4. ARGUMENTOS DE VALOR: Explica por qué el MBA en Inteligencia Artificial de Eruvia transforma carreras (Tutor de IA Dedicado 24/7, acreditación ANCYPEL, 100% online asíncrono, 9 meses, 799 € o 6 cuotas de 133,17 €, 14 días de garantía incondicional con devolución del 100%).
-5. GUÍA AL SIGUIENTE PASO: Cuando el alumno esté convencido, invítale a matricularse en la web oficial (https://eruviabs.com/es) o a resolver cualquier duda sobre temario o becas.
+5. GUÍA AL SIGUIENTE PASO: Invita cordialmente al alumno a dar el paso, matricularse en la web oficial (https://eruviabs.com/es) o a resolver cualquier duda sobre temario o financiación.
 """
     history = conversation_history.get(phone, [])
     messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": user_message}]
@@ -286,8 +282,8 @@ async def send_whatsapp_message(number: str, text: str):
 async def process_incoming_message(data: Dict[str, Any]):
     """Procesa el mensaje entrante desde el Webhook de Evolution API."""
     try:
-        event = data.get("event")
-        if event != "messages.upsert":
+        raw_event = str(data.get("event", "")).lower().replace("_", ".")
+        if raw_event != "messages.upsert":
             return
 
         payload = data.get("data", {})
@@ -308,13 +304,15 @@ async def process_incoming_message(data: Dict[str, Any]):
         user_text = (
             msg_content.get("conversation") or
             msg_content.get("extendedTextMessage", {}).get("text") or
+            msg_content.get("ephemeralMessage", {}).get("message", {}).get("conversation") or
+            msg_content.get("ephemeralMessage", {}).get("message", {}).get("extendedTextMessage", {}).get("text") or
             ""
         ).strip()
 
         if not user_text:
             return
 
-        logger.info(f"Mensaje recibido de {sender_name} ({phone_number}): {user_text}")
+        logger.info(f"Mensaje entrante de {sender_name} ({phone_number}): {user_text}")
 
         # 1. Sincronizar mensaje entrante en Odoo CRM
         lead_id = sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=user_text, is_bot_reply=False)
@@ -336,7 +334,7 @@ async def process_incoming_message(data: Dict[str, Any]):
             sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=pause_reply, is_bot_reply=True)
             return
 
-        # 4. Comprobar si la IA está pausada desde Odoo (por etiqueta del asesor en CRM)
+        # 4. Comprobar si la IA está pausada desde Odoo (por etiqueta en CRM)
         if is_lead_paused_in_odoo(phone_number):
             logger.info(f"Bot pausado para {phone_number} (Control humano activo en Odoo). Mensaje registrado en CRM.")
             return
