@@ -12,10 +12,7 @@ ODOO_DB = os.getenv("ODOO_DB", "eruvia")
 ODOO_USERNAME = os.getenv("ODOO_USERNAME", "info@eruviabs.com")
 ODOO_PASSWORD = os.getenv("ODOO_PASSWORD", "Eruvia2026!")
 
-mcp = FastMCP(
-    name="Eruvia Business School ERP & CRM",
-    description="Servidor Remote MCP oficial de Eruvia European Business School para gestión de CRM, Ventas, Gastos y Contabilidad desde Claude."
-)
+mcp = FastMCP("Eruvia Business School ERP & CRM")
 
 _cached_uid = None
 
