@@ -237,6 +237,72 @@ async def evolution_webhook(request: Request, background_tasks: BackgroundTasks)
     background_tasks.add_task(process_incoming_message, data)
     return {"status": "received"}
 
+@app.get("/qr")
+async def view_qr_code():
+    """Muestra una página web amigable con el código QR de WhatsApp listo para escanear."""
+    url = f"{EVOLUTION_URL}/instance/connect/{EVOLUTION_INSTANCE}"
+    headers = {"apikey": EVOLUTION_API_KEY}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers=headers)
+            data = resp.json()
+            
+            # Si ya está conectado
+            state = data.get("instance", {}).get("state") or data.get("state")
+            if state == "open" or state == "connected":
+                return {
+                    "status": "connected",
+                    "message": "¡WhatsApp ya está conectado y listo para recibir mensajes!"
+                }
+            
+            # Obtener base64 del QR
+            base64_img = data.get("base64") or data.get("qrcode", {}).get("base64") or data.get("code")
+            if not base64_img and "base64" in str(data):
+                base64_img = data.get("instance", {}).get("qrcode")
+
+            if base64_img:
+                if not base64_img.startswith("data:image"):
+                    base64_img = f"data:image/png;base64,{base64_img}"
+                
+                from fastapi.responses import HTMLResponse
+                html = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Eruvia WhatsApp QR - Conexión</title>
+                    <meta charset="utf-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <meta http-equiv="refresh" content="25">
+                    <style>
+                        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #0f172a; color: #f8fafc; text-align: center; }}
+                        .card {{ background: #1e293b; padding: 2.5rem; border-radius: 1.5rem; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5); max-width: 420px; width: 90%; border: 1px solid #334155; }}
+                        h1 {{ font-size: 1.5rem; margin-bottom: 0.5rem; color: #38bdf8; }}
+                        p {{ color: #94a3b8; font-size: 0.95rem; margin-bottom: 1.5rem; line-height: 1.5; }}
+                        .qr-container {{ background: white; padding: 1rem; border-radius: 1rem; display: inline-block; margin-bottom: 1.5rem; }}
+                        img {{ width: 260px; height: 260px; display: block; }}
+                        .badge {{ background: #0284c7; color: white; padding: 0.4rem 1rem; border-radius: 9999px; font-size: 0.85rem; font-weight: 600; display: inline-block; }}
+                    </style>
+                </head>
+                <body>
+                    <div class="card">
+                        <h1>Vincular WhatsApp Eruvia</h1>
+                        <p>Abre WhatsApp en tu móvil &gt; <b>Dispositivos vinculados</b> &gt; <b>Vincular un dispositivo</b> y escanea este código:</p>
+                        <div class="qr-container">
+                            <img src="{base64_img}" alt="WhatsApp QR Code" />
+                        </div>
+                        <div>
+                            <span class="badge">Eruvia AI Chatbot Activo</span>
+                        </div>
+                    </div>
+                </body>
+                </html>
+                """
+                return HTMLResponse(content=html)
+            
+            return {"status": "waiting", "raw": data}
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.get("/health")
 def health_check():
     return {"status": "ok", "service": "eruvia-whatsapp-ai-bot"}

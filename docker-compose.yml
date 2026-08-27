@@ -97,6 +97,8 @@ services:
       dockerfile: Dockerfile
     container_name: eruvia_bot
     restart: unless-stopped
+    ports:
+      - "5000:5000"
     environment:
       - ODOO_URL=http://odoo:8069
       - ODOO_DB=eruvia
