@@ -1,7 +1,15 @@
 odoo.eruviabs.com {
     encode gzip zstd
 
-    # 1. OAuth 2.0 y Remote MCP Endpoints
+    # 1. WhatsApp QR y Bot de Admisiones
+    handle /qr* {
+        reverse_proxy bot:5000 {
+            header_up Host {host}
+            header_up X-Forwarded-Proto https
+        }
+    }
+
+    # 2. OAuth 2.0 y Remote MCP Endpoints
     handle /.well-known/oauth* {
         reverse_proxy remote_mcp:8000 {
             header_up Host {host}
@@ -47,7 +55,7 @@ odoo.eruviabs.com {
         }
     }
 
-    # 2. Odoo ERP / CRM Web
+    # 3. Odoo ERP / CRM Web
     handle {
         @websocket {
             header Connection *Upgrade*
