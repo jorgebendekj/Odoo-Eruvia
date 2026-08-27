@@ -42,7 +42,7 @@ if KB_PATH.exists():
 # Memoria de conversación en memoria (últimos 10 mensajes por número)
 conversation_history: Dict[str, List[Dict[str, str]]] = {}
 
-# Set de números pausados en memoria (adicional a Odoo)
+# Estado de pausa en memoria
 paused_numbers: Dict[str, bool] = {}
 
 app = FastAPI(title="Eruvia WhatsApp AI Bot & Admissions Agent")
@@ -79,14 +79,14 @@ def check_human_intervention_needed(text: str) -> bool:
     return any(re.search(p, text_lower) for p in patterns)
 
 def is_lead_paused_in_odoo(phone: str) -> bool:
-    """Verifica si en Odoo CRM el lead está marcado para intervención humana (Pausado)."""
-    if paused_numbers.get(phone, False):
-        return True
-
+    """
+    Verifica dinámicamente en Odoo CRM si el lead tiene la etiqueta 'Intervención Humana' o 'Bot Pausado'.
+    Permite al asesor humano pausar o despausar el bot directamente desde la interfaz web de Odoo.
+    """
     try:
         uid, models = get_odoo_client()
         if not uid:
-            return False
+            return paused_numbers.get(phone, False)
 
         clean_phone = re.sub(r"[^\d+]", "", phone)
         lead_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "search", [
@@ -94,7 +94,7 @@ def is_lead_paused_in_odoo(phone: str) -> bool:
         ], {"limit": 1})
 
         if lead_ids:
-            lead = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "read", [lead_ids], {"fields": ["tag_ids", "description"]})
+            lead = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "read", [lead_ids], {"fields": ["tag_ids"]})
             if lead:
                 tags = lead[0].get("tag_ids", [])
                 if tags:
@@ -104,10 +104,14 @@ def is_lead_paused_in_odoo(phone: str) -> bool:
                         if "humano" in name or "pausa" in name or "asesor" in name or "human" in name:
                             paused_numbers[phone] = True
                             return True
+
+                # Si el asesor en Odoo eliminó la etiqueta, se reactiva automáticamente el bot
+                paused_numbers[phone] = False
+                return False
     except Exception as e:
         logger.error(f"Error verificando estado de pausa en Odoo: {e}")
 
-    return False
+    return paused_numbers.get(phone, False)
 
 def set_human_intervention_in_odoo(phone: str, sender_name: str, lead_id: int):
     """Marca la oportunidad en Odoo con etiqueta de Intervención Humana y alta prioridad."""
@@ -130,9 +134,10 @@ def set_human_intervention_in_odoo(phone: str, sender_name: str, lead_id: int):
         }])
 
         alert_body = f"""
-        <div style="background:#fee2e2;border-left:4px solid #ef4444;padding:10px;border-radius:4px;">
-            <p style="margin:0;color:#991b1b;font-weight:bold;">🚨 ATENCIÓN REQUERIDA: Intervención Humana Solicitada</p>
+        <div style="background:#fee2e2;border-left:4px solid #ef4444;padding:12px;border-radius:6px;margin:8px 0;">
+            <p style="margin:0;color:#991b1b;font-weight:bold;font-size:14px;">🚨 ATENCIÓN REQUERIDA: Intervención Humana Solicitada</p>
             <p style="margin:5px 0 0;color:#7f1d1d;font-size:13px;">El alumno <b>{sender_name or phone}</b> ha solicitado hablar con un asesor. Las respuestas automáticas de la IA han sido <b>PAUSADAS</b> para este contacto.</p>
+            <p style="margin:6px 0 0;color:#57534e;font-size:11px;"><em>Tip: Puedes reactivar a la IA en cualquier momento quitando la etiqueta 'Intervención Humana' o escribiendo /activar.</em></p>
         </div>
         """
         models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "mail.message", "create", [{
@@ -322,7 +327,7 @@ async def process_incoming_message(data: Dict[str, Any]):
             sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=reactivate_msg, is_bot_reply=True)
             return
 
-        # 3. Comprobar si el usuario solicita intervención humana
+        # 3. Comprobar si el usuario solicita intervención humana por WhatsApp
         if check_human_intervention_needed(user_text):
             if lead_id:
                 set_human_intervention_in_odoo(phone_number, sender_name, lead_id)
@@ -331,9 +336,9 @@ async def process_incoming_message(data: Dict[str, Any]):
             sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=pause_reply, is_bot_reply=True)
             return
 
-        # 4. Si el bot está pausado para este número (un asesor humano está atendiendo), NO responder con IA
+        # 4. Comprobar si la IA está pausada desde Odoo (por etiqueta del asesor en CRM)
         if is_lead_paused_in_odoo(phone_number):
-            logger.info(f"Bot pausado para {phone_number}. Mensaje sincronizado en Odoo CRM para atención humana.")
+            logger.info(f"Bot pausado para {phone_number} (Control humano activo en Odoo). Mensaje sincronizado en CRM.")
             return
 
         # 5. Generar respuesta con IA multilingüe
