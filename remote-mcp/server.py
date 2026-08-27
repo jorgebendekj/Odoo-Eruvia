@@ -6,25 +6,24 @@ import xmlrpc.client
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-from starlette.applications import Starlette
-from starlette.middleware import Middleware
-from starlette.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
-from starlette.routing import Mount
-import uvicorn
 
 load_dotenv()
 
 ODOO_URL = os.getenv("ODOO_URL", "http://odoo:8069").rstrip("/")
 ODOO_DB = os.getenv("ODOO_DB", "eruvia")
 
+# Servidor Oficial FastMCP de Anthropic con host 0.0.0.0
+mcp = FastMCP(
+    "Eruvia Business School ERP & CRM",
+    host="0.0.0.0",
+    port=8000
+)
+mcp.settings.host = "0.0.0.0"
+mcp.settings.port = 8000
+
 # ContextVars por petición para soportar multi-usuario dinámico
 current_user_email = contextvars.ContextVar("current_user_email", default="info@eruviabs.com")
 current_user_password = contextvars.ContextVar("current_user_password", default="Eruvia2026!")
-
-# Servidor Oficial FastMCP de Anthropic
-mcp = FastMCP("Eruvia Business School ERP & CRM")
 
 def get_odoo():
     """Obtiene el UID y proxy de modelos de Odoo autenticando con el usuario actual de la petición."""
@@ -240,66 +239,6 @@ def execute_odoo(model: str, method: str, args: List[Any] = [], kwargs: Dict[str
     """Herramienta universal de acceso a cualquier modelo del ERP."""
     uid, models, password = get_odoo()
     return models.execute_kw(ODOO_DB, uid, password, model, method, args, kwargs)
-
-# ==============================================================================
-# AUTENTICACIÓN DINÁMICA CON USUARIO Y CONTRASEÑA DE ODOO (x-odoo-email / password)
-# ==============================================================================
-
-class OdooUserAuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        if request.method == "OPTIONS":
-            return await call_next(request)
-
-        email = request.headers.get("x-odoo-email") or request.headers.get("x-odoo-username") or request.headers.get("x-eruvia-email")
-        password = request.headers.get("x-odoo-password") or request.headers.get("x-odoo-api-key") or request.headers.get("x-eruvia-password")
-
-        # Soporte para Basic Auth (Authorization: Basic base64(email:password))
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Basic ") and not email:
-            try:
-                decoded = base64.b64decode(auth_header.split("Basic ")[-1]).decode("utf-8")
-                email, password = decoded.split(":", 1)
-            except Exception:
-                pass
-
-        if not email or not password:
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "jsonrpc": "2.0",
-                    "id": "unauthorized",
-                    "error": {
-                        "code": -32000,
-                        "message": "Acceso denegado: Debes configurar tus credenciales de Odoo en los encabezados 'x-odoo-email' y 'x-odoo-password'."
-                    }
-                }
-            )
-
-        # Validar directamente contra la base de datos de Odoo
-        common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
-        try:
-            uid = common.authenticate(ODOO_DB, email, password, {})
-            if not uid:
-                return JSONResponse(
-                    status_code=401,
-                    content={
-                        "jsonrpc": "2.0",
-                        "id": "unauthorized",
-                        "error": {
-                            "code": -32000,
-                            "message": f"Acceso denegado: Usuario o contraseña incorrectos en Odoo para '{email}'."
-                        }
-                    }
-                )
-        except Exception as e:
-            return JSONResponse(
-                status_code=500,
-                content={"jsonrpc": "2.0", "id": "error", "error": {"code": -32000, "message": f"Error comunicando con Odoo: {str(e)}"}}
-            )
-
-        current_user_email.set(email)
-        current_user_password.set(password)
-        return await call_next(request)
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
