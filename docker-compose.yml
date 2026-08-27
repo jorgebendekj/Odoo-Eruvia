@@ -98,6 +98,9 @@ services:
       dockerfile: Dockerfile
     container_name: eruvia_bot
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     ports:
       - "5000:5000"
     environment:
@@ -123,6 +126,9 @@ services:
       dockerfile: Dockerfile
     container_name: eruvia_remote_mcp
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     ports:
       - "8000:8000"
     environment:
