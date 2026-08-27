@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "eruvia-odoo": {
+      "command": "python",
+      "args": [
+        "C:\\Users\\jorge\\OneDrive\\Documents\\Eruvia\\Odoo Eruvia\\mcp-server\\server.py"
+      ],
+      "env": {
+        "ODOO_URL": "https://crm.eruvia.com",
+        "ODOO_DB": "eruvia",
+        "ODOO_USERNAME": "admin@eruvia.com",
+        "ODOO_API_KEY": "TU_API_KEY_GENERADA_EN_ODOO"
+      }
+    },
+    "odoo-community-standard": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-odoo"
+      ],
+      "env": {
+        "ODOO_URL": "https://crm.eruvia.com",
+        "ODOO_DB": "eruvia",
+        "ODOO_USERNAME": "admin@eruvia.com",
+        "ODOO_PASSWORD": "TU_API_KEY_GENERADA_EN_ODOO"
+      }
+    }
+  }
+}

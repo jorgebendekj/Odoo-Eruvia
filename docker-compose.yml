@@ -1,0 +1,59 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: eruvia_caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN_NAME=${DOMAIN_NAME:-crm.eruvia.com}
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - odoo
+    networks:
+      - eruvia_net
+
+  odoo:
+    image: odoo:18.0
+    container_name: eruvia_odoo
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      - HOST=db
+      - USER=odoo
+      - PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - ./config/odoo.conf:/etc/odoo/odoo.conf:ro
+      - ./addons:/mnt/extra-addons
+      - odoo_data:/var/lib/odoo
+    networks:
+      - eruvia_net
+
+  db:
+    image: postgres:16-alpine
+    container_name: eruvia_postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=odoo
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - db_data:/var/lib/postgresql/data/pgdata
+    networks:
+      - eruvia_net
+
+networks:
+  eruvia_net:
+    driver: bridge
+
+volumes:
+  odoo_data:
+  db_data:
+  caddy_data:
+  caddy_config:

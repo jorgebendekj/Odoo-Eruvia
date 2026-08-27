@@ -1,0 +1,23 @@
+{$DOMAIN_NAME:crm.eruvia.com} {
+    encode gzip zstd
+
+    # Odoo Longpolling / Websocket
+    @websocket {
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+    reverse_proxy @websocket odoo:8069
+
+    # Odoo Web Principal y API
+    reverse_proxy odoo:8069 {
+        header_up X-Forwarded-Proto https
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+    }
+
+    # Logs
+    log {
+        output stdout
+        format console
+    }
+}

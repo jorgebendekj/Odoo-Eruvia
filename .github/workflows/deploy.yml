@@ -1,0 +1,25 @@
+name: Despliegue en DigitalOcean
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Desplegar en Droplet vía SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DO_DROPLET_IP }}
+          username: ${{ secrets.DO_DROPLET_USER || 'root' }}
+          key: ${{ secrets.DO_SSH_PRIVATE_KEY }}
+          script: |
+            cd /opt/eruvia-odoo
+            git pull origin main
+            docker compose up -d --remove-orphans
+            docker image prune -f

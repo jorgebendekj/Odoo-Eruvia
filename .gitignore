@@ -1,0 +1,25 @@
+# Entorno y credenciales
+.env
+*.env
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+
+# Odoo y datos
+data/
+filestore/
+*.log
+*.sql
+*.dump
+*.zip
+
+# IDEs y SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
