@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 load_dotenv()
 
@@ -238,6 +238,15 @@ def execute_odoo(model: str, method: str, args: List[Any] = [], kwargs: Dict[str
 # ENDPOINTS NATIVOS OAUTH 2.0 (VIA @mcp.custom_route)
 # ==============================================================================
 
+# Servir Logo Oficial
+@mcp.custom_route("/logo.png", methods=["GET"])
+async def serve_logo(request: Request):
+    logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
+    if os.path.exists(logo_path):
+        with open(logo_path, "rb") as f:
+            return Response(content=f.read(), media_type="image/png")
+    return Response(status_code=404)
+
 # 1. Metadatos de descubrimiento de Servidor de Autorización
 @mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET"])
 @mcp.custom_route("/.well-known/openid-configuration", methods=["GET"])
@@ -292,23 +301,23 @@ LOGIN_HTML = """
     <title>Eruvia European Business School - Conectar Claude IA</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-        .card { background: #1e293b; padding: 2.5rem; border-radius: 1rem; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5); width: 100%; max-width: 400px; border: 1px solid #334155; }
-        .logo { text-align: center; margin-bottom: 1.5rem; }
-        .logo h2 { margin: 0.5rem 0 0; color: #38bdf8; font-size: 1.4rem; }
+        .card { background: #1e293b; padding: 2.5rem; border-radius: 1.25rem; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6); width: 100%; max-width: 420px; border: 1px solid #334155; }
+        .logo { text-align: center; margin-bottom: 1.8rem; }
+        .logo img { max-width: 240px; height: auto; margin-bottom: 0.8rem; background: #ffffff; padding: 0.5rem 1rem; border-radius: 0.5rem; }
         .logo p { margin: 0.2rem 0 0; color: #94a3b8; font-size: 0.85rem; }
         .form-group { margin-bottom: 1.2rem; }
         label { display: block; margin-bottom: 0.4rem; font-size: 0.9rem; color: #cbd5e1; }
-        input { width: 100%; padding: 0.75rem; border-radius: 0.5rem; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; font-size: 1rem; }
+        input { width: 100%; padding: 0.8rem; border-radius: 0.5rem; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; font-size: 1rem; }
         input:focus { outline: none; border-color: #38bdf8; }
-        button { width: 100%; padding: 0.85rem; border-radius: 0.5rem; border: none; background: #2563eb; color: #fff; font-weight: 600; font-size: 1rem; cursor: pointer; transition: background 0.2s; margin-top: 0.5rem; }
-        button:hover { background: #1d4ed8; }
+        button { width: 100%; padding: 0.85rem; border-radius: 0.5rem; border: none; background: #c59b27; color: #0b1c3d; font-weight: 700; font-size: 1rem; cursor: pointer; transition: background 0.2s; margin-top: 0.5rem; }
+        button:hover { background: #d8aa2b; }
         .error { background: #ef444422; border: 1px solid #ef4444; color: #fca5a5; padding: 0.75rem; border-radius: 0.5rem; margin-bottom: 1rem; font-size: 0.85rem; text-align: center; }
     </style>
 </head>
 <body>
     <div class="card">
         <div class="logo">
-            <h2>🏛️ Eruvia Business School</h2>
+            <img src="/logo.png" alt="Eruvia European Business School">
             <p>Conexión segura de Asistente IA (Claude)</p>
         </div>
         {ERROR_BLOCK}
