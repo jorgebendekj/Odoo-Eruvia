@@ -28,10 +28,10 @@ EVOLUTION_URL = os.getenv("EVOLUTION_URL", "http://evolution_api:8080").rstrip("
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "eruvia_secret_token_2026")
 EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "eruvia")
 
-# Configuración IA (OpenAI / Groq / DeepSeek / Hugging Face / OpenRouter)
-AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+# Configuración IA (Kimi-K3 / Moonshot AI via Hugging Face Router)
+AI_BASE_URL = os.getenv("AI_BASE_URL", "https://router.huggingface.co/v1").rstrip("/")
 AI_API_KEY = os.getenv("AI_API_KEY", "")
-AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
+AI_MODEL = os.getenv("AI_MODEL", "moonshotai/Kimi-K3:together")
 
 # Cargar base de conocimiento
 KB_PATH = Path(__file__).parent / "knowledge_base.md"
@@ -199,7 +199,7 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
             logger.info(f"Nueva oportunidad creada en Odoo CRM: ID {lead_id} ({lead_title})")
 
         author = "🤖 Asistente Virtual Eruvia" if is_bot_reply else f"📱 Alumno ({sender_name or clean_phone})"
-        body_msg = f"<p><b>{author}:</b></p><p><pre style='white-space:pre-wrap;font-family:inherit;'>{message_text}</pre></p>"
+        body_msg = f"<p><b>{author}:</b></p><pre style='white-space:pre-wrap;font-family:inherit;'>{message_text}</pre>"
         models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "mail.message", "create", [{
             "model": "crm.lead",
             "res_id": lead_id,
@@ -214,7 +214,7 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
         return None
 
 async def generate_ai_reply(phone: str, user_message: str) -> str:
-    """Genera una respuesta inteligente y consultiva utilizando el motor de IA."""
+    """Genera una respuesta inteligente y consultiva utilizando Kimi K3 de Moonshot AI."""
     if not AI_API_KEY:
         return (
             "¡Hola! 👋 Qué gusto saludarte. Soy el asesor académico de Eruvia European Business School.\n\n"
@@ -225,15 +225,15 @@ async def generate_ai_reply(phone: str, user_message: str) -> str:
     
     system_prompt = f"""Eres el Asesor Académico y de Admisiones oficial de Eruvia European Business School (Your AI Native Business School, miembro de ANCYPEL).
 
-BASE DE CONOCIMIENTO DE ERUVIA:
+BASE DE CONOCIMIENTO OFICIAL DE ERUVIA:
 {KNOWLEDGE_BASE}
 
 ESTILO Y COMPORTAMIENTO:
-1. CONVERSACIONAL Y CONSULTIVO: No respondas de forma fría ni envíes correos de golpe. Conversa de manera cercana, empática e inspiradora. Haz preguntas abiertas para conocer al alumno (ej. "¿En qué área te desempeñas actualmente?", "¿Qué objetivos profesionales tienes en mente?").
+1. CONVERSACIONAL Y CONSULTIVO: Conversa de forma cálida, profesional, empática e inspiradora. Haz preguntas para conocer los objetivos del alumno (ej. "¿En qué sector o puesto trabajas actualmente?", "¿Qué metas buscas alcanzar con la Inteligencia Artificial?").
 2. MULTILINGÜE: Responde siempre en el MISMO idioma que use el usuario (Español, Inglés, Portugués, Francés, etc.).
-3. FORMATO WHATSAPP: Respuestas claras, agradables y bien formateadas con viñetas o emojis sobrios. Evita textos interminables.
-4. ASESORÍA DE VALOR: Explica por qué el MBA en Inteligencia Artificial de Eruvia transforma carreras (Tutor IA 24/7, acreditación ANCYPEL, 100% online, 9 meses, 799 € o 6 cuotas de 133,17 €, 14 días de garantía incondicional).
-5. GUÍA AL SIGUIENTE PASO: Cuando el alumno esté listo, anímale a matricularse en la web o consultar si tiene dudas sobre temario o financiación.
+3. FORMATO WHATSAPP: Respuestas claras y atractivas con viñetas o emojis sobrios. Evita respuestas excesivamente largas.
+4. ARGUMENTOS DE VALOR: Explica por qué el MBA en Inteligencia Artificial de Eruvia transforma carreras (Tutor de IA Dedicado 24/7, acreditación ANCYPEL, 100% online asíncrono, 9 meses, 799 € o 6 cuotas de 133,17 €, 14 días de garantía incondicional con devolución del 100%).
+5. GUÍA AL SIGUIENTE PASO: Cuando el alumno esté convencido, invítale a matricularse en la web oficial (https://eruviabs.com/es) o a resolver cualquier duda sobre temario o becas.
 """
     history = conversation_history.get(phone, [])
     messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": user_message}]
@@ -242,10 +242,12 @@ ESTILO Y COMPORTAMIENTO:
         response = client.chat.completions.create(
             model=AI_MODEL,
             messages=messages,
-            temperature=0.7,
-            max_tokens=600
+            temperature=0.7
         )
-        reply = response.choices[0].message.content.strip()
+        msg_obj = response.choices[0].message
+        reply = (msg_obj.content or "").strip()
+        if not reply and hasattr(msg_obj, "reasoning_content") and msg_obj.reasoning_content:
+            reply = msg_obj.reasoning_content.strip()
 
         history.append({"role": "user", "content": user_message})
         history.append({"role": "assistant", "content": reply})
@@ -253,7 +255,7 @@ ESTILO Y COMPORTAMIENTO:
 
         return reply
     except Exception as e:
-        logger.error(f"Error llamando al motor de IA ({AI_BASE_URL} / {AI_MODEL}): {e}")
+        logger.error(f"Error llamando a Kimi-K3 ({AI_BASE_URL} / {AI_MODEL}): {e}")
         return (
             "¡Hola! 👋 Qué gusto saludarte. Soy el asesor de admisiones de Eruvia European Business School.\n\n"
             "¿En qué te puedo ayudar hoy? ¿Te gustaría conocer más sobre el contenido y metodología de nuestro MBA en Inteligencia Artificial o sobre las opciones de financiación?"
@@ -339,7 +341,7 @@ async def process_incoming_message(data: Dict[str, Any]):
             logger.info(f"Bot pausado para {phone_number} (Control humano activo en Odoo). Mensaje registrado en CRM.")
             return
 
-        # 5. Generar respuesta con IA interactiva y consultiva
+        # 5. Generar respuesta con Kimi K3 (Moonshot AI)
         ai_reply = await generate_ai_reply(phone_number, user_text)
 
         # 6. Enviar respuesta por WhatsApp
