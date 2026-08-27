@@ -248,7 +248,6 @@ app.add_middleware(
 
 # 1. Metadatos OAuth 2.0 para descubrimiento automático de Claude
 @app.get("/.well-known/oauth-authorization-server")
-@app.get("/.well-known/oauth-protected-resource")
 @app.get("/.well-known/openid-configuration")
 async def oauth_discovery():
     return {
@@ -263,6 +262,19 @@ async def oauth_discovery():
         "scopes_supported": ["mcp", "openid", "profile", "email"]
     }
 
+# 1.1 Metadatos Protected Resource (RFC 9207)
+@app.get("/.well-known/oauth-protected-resource")
+@app.get("/.well-known/oauth-protected-resource/mcp")
+@app.get("/.well-known/oauth-protected-resource/{path:path}")
+async def protected_resource():
+    return {
+        "resource": "https://odoo.eruviabs.com/mcp",
+        "authorization_servers": ["https://odoo.eruviabs.com"],
+        "scopes_supported": ["mcp", "openid", "profile", "email"],
+        "bearer_methods_supported": ["header"],
+        "resource_documentation": "https://odoo.eruviabs.com"
+    }
+
 # 2. Registro dinámico de cliente (RFC 7591)
 @app.post("/oauth/register")
 async def oauth_register(request: Request):
@@ -274,7 +286,10 @@ async def oauth_register(request: Request):
         "client_id": "claude_connector_eruvia",
         "client_secret": "eruvia_secret_2026",
         "client_name": data.get("client_name", "Claude Custom Connector"),
-        "redirect_uris": data.get("redirect_uris", ["https://claude.ai/api/integrations/oauth/callback"])
+        "redirect_uris": data.get("redirect_uris", [
+            "https://claude.ai/api/integrations/oauth/callback",
+            "https://claude.ai/api/mcp/auth_callback"
+        ])
     })
 
 # 3. Pantalla de inicio de sesión OAuth para el funcionario
@@ -330,7 +345,7 @@ LOGIN_HTML = """
 async def oauth_authorize_get(
     request: Request,
     client_id: str = "claude_connector_eruvia",
-    redirect_uri: str = "https://claude.ai/api/integrations/oauth/callback",
+    redirect_uri: str = "https://claude.ai/api/mcp/auth_callback",
     state: str = "",
     response_type: str = "code"
 ):
@@ -346,7 +361,7 @@ async def oauth_authorize_post(
     request: Request,
     email: str = Form(...),
     password: str = Form(...),
-    redirect_uri: str = Form("https://claude.ai/api/integrations/oauth/callback"),
+    redirect_uri: str = Form("https://claude.ai/api/mcp/auth_callback"),
     state: str = Form(""),
     client_id: str = Form("claude_connector_eruvia")
 ):
@@ -388,8 +403,11 @@ async def oauth_authorize_post(
 # 4. Emisión de Access Token OAuth
 @app.post("/oauth/token")
 async def oauth_token(request: Request):
-    form_data = await request.form() if "application/x-www-form-urlencoded" in request.headers.get("content-type", "") else {}
-    if not form_data:
+    form_data = {}
+    content_type = request.headers.get("content-type", "")
+    if "application/x-www-form-urlencoded" in content_type:
+        form_data = dict(await request.form())
+    else:
         try:
             form_data = await request.json()
         except Exception:
@@ -403,7 +421,6 @@ async def oauth_token(request: Request):
     elif refresh_token and refresh_token in OAUTH_TOKENS:
         auth_info = OAUTH_TOKENS[refresh_token]
     else:
-        # Fallback a credenciales maestras si Claude solicita client_credentials
         auth_info = {"email": "info@eruviabs.com", "password": "Eruvia2026!", "uid": 6}
 
     access_token = f"eruvia_tok_{secrets.token_hex(24)}"
@@ -426,8 +443,11 @@ async def oauth_token(request: Request):
     })
 
 # ==============================================================================
-# MIDDLEWARE DE INYECCIÓN DE USUARIO OAUTH A FASTMCP
+# PROCESAMIENTO DIRECTO SIN REDIRECTS PARA /mcp
 # ==============================================================================
+
+mcp_http = mcp.streamable_http_app()
+mcp_sse = mcp.sse_app()
 
 @app.middleware("http")
 async def extract_oauth_user_middleware(request: Request, call_next):
@@ -436,7 +456,6 @@ async def extract_oauth_user_middleware(request: Request, call_next):
     if auth_header.startswith("Bearer "):
         token = auth_header.split("Bearer ")[-1].strip()
 
-    # Si hay token OAuth registrado, inyectar el usuario
     if token and token in OAUTH_TOKENS:
         user_info = OAUTH_TOKENS[token]
         current_user_email.set(user_info["email"])
@@ -447,11 +466,18 @@ async def extract_oauth_user_middleware(request: Request, call_next):
 
     return await call_next(request)
 
-# Montar endpoints oficiales de FastMCP (Streamable HTTP y SSE)
-mcp_http = mcp.streamable_http_app()
-app.mount("/mcp", mcp_http)
-app.mount("/sse", mcp.sse_app())
-app.mount("/messages", mcp.sse_app())
+# Despachar directamente /mcp sin emitir 307 Redirects
+@app.api_route("/mcp", methods=["GET", "POST", "HEAD", "OPTIONS", "DELETE", "PUT"])
+@app.api_route("/mcp/{path:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "DELETE", "PUT"])
+async def handle_mcp_raw(request: Request, path: str = ""):
+    # Modificar el scope para que apunte a /mcp dentro del FastMCP ASGI app
+    scope = dict(request.scope)
+    scope["path"] = "/mcp"
+    scope["raw_path"] = b"/mcp"
+    return await mcp_http(scope, request.receive, request._send)
+
+app.mount("/sse", mcp_sse)
+app.mount("/messages", mcp_sse)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
