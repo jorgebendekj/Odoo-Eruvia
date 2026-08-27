@@ -59,20 +59,27 @@ def get_odoo_client():
         return None, None
 
 def check_human_intervention_needed(text: str) -> bool:
-    """Detecta si el mensaje del usuario pide expresamente hablar con un humano o asesor."""
+    """Detecta si el mensaje del usuario pide expresamente hablar con un humano o asesor en varios idiomas."""
     patterns = [
+        # Español
         r"\b(hablar con (un|una) persona|humano|asesor|agente)\b",
         r"\b(atenci[oó]n humana|persona real|alguien real|llamada|ll[aá]menme)\b",
         r"\b(quiero hablar con alguien|comunicarme con un asesor)\b",
         r"\b(transferir|pasar con un asesor|asesor comercial)\b",
-        r"\b(/pausar|/humano)\b"
+        r"\b(/pausar|/humano)\b",
+        # English
+        r"\b(talk to a human|speak to a person|human agent|advisor|call me|real person|agent|support agent)\b",
+        r"\b(transfer me|speak with someone)\b",
+        # Português
+        r"\b(falar com atendente|pessoa real|humano|consultor|me liga|falar com algu[eé]m)\b",
+        # Français
+        r"\b(parler [aà] un humain|conseiller|personne r[eé]elle|agent|appelez-moi)\b"
     ]
     text_lower = text.lower()
     return any(re.search(p, text_lower) for p in patterns)
 
 def is_lead_paused_in_odoo(phone: str) -> bool:
     """Verifica si en Odoo CRM el lead está marcado para intervención humana (Pausado)."""
-    # Si ya está pausado en memoria
     if paused_numbers.get(phone, False):
         return True
 
@@ -82,7 +89,6 @@ def is_lead_paused_in_odoo(phone: str) -> bool:
             return False
 
         clean_phone = re.sub(r"[^\d+]", "", phone)
-        # Buscar lead por teléfono
         lead_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "search", [
             ["|", ("phone", "ilike", clean_phone[-9:]), ("mobile", "ilike", clean_phone[-9:])]
         ], {"limit": 1})
@@ -91,12 +97,11 @@ def is_lead_paused_in_odoo(phone: str) -> bool:
             lead = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "read", [lead_ids], {"fields": ["tag_ids", "description"]})
             if lead:
                 tags = lead[0].get("tag_ids", [])
-                # Si tiene etiquetas, verificar si alguna es "Intervención Humana" o "Bot Pausado"
                 if tags:
                     tag_records = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.tag", "read", [tags], {"fields": ["name"]})
                     for t in tag_records:
                         name = t.get("name", "").lower()
-                        if "humano" in name or "pausa" in name or "asesor" in name:
+                        if "humano" in name or "pausa" in name or "asesor" in name or "human" in name:
                             paused_numbers[phone] = True
                             return True
     except Exception as e:
@@ -113,20 +118,17 @@ def set_human_intervention_in_odoo(phone: str, sender_name: str, lead_id: int):
 
         paused_numbers[phone] = True
 
-        # Buscar o crear tag "Intervención Humana"
         tag_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.tag", "search", [[("name", "ilike", "Intervención Humana")]], {"limit": 1})
         if not tag_ids:
             tag_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.tag", "create", [{"name": "Intervención Humana", "color": 1}])
         else:
             tag_id = tag_ids[0]
 
-        # Actualizar oportunidad: Prioridad alta (3 estrellas) y agregar tag
         models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "write", [[lead_id], {
             "priority": "3",
             "tag_ids": [(4, tag_id)]
         }])
 
-        # Publicar notificación destacada en el chatter
         alert_body = f"""
         <div style="background:#fee2e2;border-left:4px solid #ef4444;padding:10px;border-radius:4px;">
             <p style="margin:0;color:#991b1b;font-weight:bold;">🚨 ATENCIÓN REQUERIDA: Intervención Humana Solicitada</p>
@@ -157,7 +159,6 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
 
         clean_phone = re.sub(r"[^\d+]", "", phone)
         
-        # 1. Buscar contacto existente por teléfono
         domain = ["|", ("phone", "ilike", clean_phone[-9:]), ("mobile", "ilike", clean_phone[-9:])]
         partner_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "search", [domain], {"limit": 1})
         
@@ -169,11 +170,10 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
                 "name": partner_name,
                 "phone": clean_phone,
                 "mobile": clean_phone,
-                "comment": "Contacto generado automáticamente por el Asistente de WhatsApp de Eruvia."
+                "comment": "Contacto generado automáticamente por el Asistente Multilingüe de WhatsApp de Eruvia."
             }])
             logger.info(f"Nuevo contacto creado en Odoo: ID {partner_id} ({partner_name})")
 
-        # 2. Buscar Oportunidad activa en CRM
         lead_domain = [
             ("partner_id", "=", partner_id),
             ("type", "=", "opportunity"),
@@ -191,12 +191,11 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
                 "contact_name": sender_name or clean_phone,
                 "phone": clean_phone,
                 "type": "opportunity",
-                "expected_revenue": 799.0, # Precio del MBA en IA
+                "expected_revenue": 799.0,
                 "description": f"Primer mensaje recibido por WhatsApp:\n\n{message_text}"
             }])
             logger.info(f"Nueva oportunidad creada en Odoo CRM: ID {lead_id} ({lead_title})")
 
-        # 3. Registrar mensaje en el chatter de la oportunidad
         author = "🤖 Asistente Virtual Eruvia" if is_bot_reply else f"📱 Alumno ({sender_name or clean_phone})"
         body_msg = f"<p><b>{author}:</b></p><p><em>{message_text}</em></p>"
         models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "mail.message", "create", [{
@@ -213,28 +212,29 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
         return None
 
 async def generate_ai_reply(phone: str, user_message: str) -> str:
-    """Genera una respuesta inteligente utilizando el proveedor de IA configurado."""
+    """Genera una respuesta inteligente multilingüe utilizando el proveedor de IA configurado."""
     if not AI_API_KEY:
-        return "¡Hola! Gracias por comunicarte con Eruvia European Business School. En breve uno de nuestros asesores académicos te atenderá personalmente."
+        return "¡Hola! Gracias por comunicarte con Eruvia European Business School. En breve uno de nuestros asesores académicos te atenderá personalmente. (Contact: info@eruviabs.com)"
 
     client = OpenAI(base_url=AI_BASE_URL, api_key=AI_API_KEY)
     
-    system_prompt = f"""Eres el Asesor Académico y de Admisiones oficial de Eruvia European Business School (Your AI Native Business School, miembro de ANCYPEL).
-Tu objetivo es asesorar con entusiasmo, rigor y calidez a futuros alumnos sobre el "MBA en Inteligencia Artificial" y programas ejecutivos de Eruvia.
+    system_prompt = f"""You are the official Multilingual Academic & Admissions Advisor at Eruvia European Business School (Your AI Native Business School, official member of ANCYPEL).
 
-BASE DE CONOCIMIENTO OFICIAL:
+OFFICIAL KNOWLEDGE BASE:
 {KNOWLEDGE_BASE}
 
-DIRECTRICES DE CONVERSACIÓN:
-1. Sé empático, cercano, profesional y persuasivo.
-2. Formato WhatsApp: Respuestas concisas, claras y directas (máximo 2-3 párrafos cortos o listas con viñetas).
-3. Resalta las fortalezas clave de Eruvia:
-   - MBA Propio Europeo 100% online y flexible (9 meses).
-   - Tutor de IA Dedicado 24/7 + feedback docente diario de líderes de la industria.
-   - Aval y rigor como miembro de ANCYPEL.
-   - Precio promocional de 799 € (o 6 cuotas de 133,17 €/mes sin intereses).
-   - Garantía total de satisfacción de 14 días (devolución del 100%).
-4. Si el alumno desea formalizar su matrícula, solicitar una beca o agendar una llamada con el comité de admisiones, anímale y confírmale que un asesor humano le asistirá.
+CORE DIRECTIVES:
+1. MULTILINGUAL FLUENCY: Always detect the language of the prospective student and answer natively in THAT EXACT SAME LANGUAGE (Spanish, English, Portuguese, French, German, Italian, etc.). If the user switches languages, switch smoothly.
+2. TONE & STYLE: Warm, inspiring, professional, empathetic, and consultative.
+3. WHATSAPP FORMAT: Concise, clear, easy-to-read messages (maximum 2-3 short paragraphs or clean bullet points). Avoid huge walls of text.
+4. KEY VALUE PROPOSITIONS OF ERUVIA:
+   - 100% Online & Flexible European Master's Degree (9 Months).
+   - Dedicated 24/7 AI Tutor + Daily faculty guidance by top tech industry executives.
+   - Quality backing as an official member of ANCYPEL (founded 1977).
+   - Special Promotional Tuition: 799 € (regular 999 €) or 6 monthly installments of 133.17 € without predatory interest via Stripe.
+   - 14-Day Unconditional Money-Back Guarantee (100% refund writing to info@eruviabs.com).
+   - Official contact email: info@eruviabs.com.
+5. CALL TO ACTION: Encourage the student to share their background, goals, or questions, and help them take the next step to enroll or connect with admissions.
 """
     history = conversation_history.get(phone, [])
     messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": user_message}]
@@ -248,7 +248,6 @@ DIRECTRICES DE CONVERSACIÓN:
         )
         reply = response.choices[0].message.content.strip()
 
-        # Actualizar historial en memoria
         history.append({"role": "user", "content": user_message})
         history.append({"role": "assistant", "content": reply})
         conversation_history[phone] = history[-10:]
@@ -256,7 +255,7 @@ DIRECTRICES DE CONVERSACIÓN:
         return reply
     except Exception as e:
         logger.error(f"Error llamando al motor de IA ({AI_BASE_URL} / {AI_MODEL}): {e}")
-        return "¡Hola! Gracias por comunicarte con Eruvia European Business School. Hemos recibido tu mensaje y en breves momentos un asesor de admisiones te atenderá con gusto."
+        return "¡Hola! Gracias por comunicarte con Eruvia European Business School. Hemos recibido tu mensaje y en breves momentos un asesor de admisiones te atenderá con gusto. (Email: info@eruviabs.com)"
 
 async def send_whatsapp_message(number: str, text: str):
     """Envía un mensaje de texto a través de Evolution API."""
@@ -290,12 +289,11 @@ async def process_incoming_message(data: Dict[str, Any]):
         payload = data.get("data", {})
         key = payload.get("key", {})
         
-        # Ignorar mensajes enviados por el propio bot
         if key.get("fromMe", False):
             return
 
         remote_jid = key.get("remoteJid", "")
-        if not remote_jid or "@g.us" in remote_jid: # Ignorar grupos
+        if not remote_jid or "@g.us" in remote_jid:
             return
 
         phone_number = remote_jid.split("@")[0]
@@ -317,9 +315,9 @@ async def process_incoming_message(data: Dict[str, Any]):
         lead_id = sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=user_text, is_bot_reply=False)
 
         # 2. Comando para reactivar el bot si estaba pausado
-        if user_text.lower() in ["/activar", "/bot", "/iniciar", "menu"]:
+        if user_text.lower() in ["/activar", "/bot", "/iniciar", "menu", "/start"]:
             paused_numbers[phone_number] = False
-            reactivate_msg = "¡Hola de nuevo! Asistente virtual de Eruvia reactivado. ¿En qué te puedo ayudar hoy sobre nuestros programas o admisiones?"
+            reactivate_msg = "¡Hola de nuevo! Asistente virtual de Eruvia reactivado. ¿En qué te puedo ayudar hoy sobre nuestros programas o admisiones? / Hello! Eruvia virtual assistant reactivated. How can I help you today?"
             await send_whatsapp_message(number=remote_jid, text=reactivate_msg)
             sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=reactivate_msg, is_bot_reply=True)
             return
@@ -328,7 +326,7 @@ async def process_incoming_message(data: Dict[str, Any]):
         if check_human_intervention_needed(user_text):
             if lead_id:
                 set_human_intervention_in_odoo(phone_number, sender_name, lead_id)
-            pause_reply = "¡Entendido! He pausado mis respuestas automáticas y he notificado a nuestro equipo de admisiones. Un asesor humano de Eruvia revisará esta conversación y se comunicará contigo por aquí en breve. 👨‍💼✨"
+            pause_reply = "¡Entendido! He pausado mis respuestas automáticas y he notificado a nuestro equipo de admisiones. Un asesor humano de Eruvia revisará esta conversación y se comunicará contigo por aquí en breve. 👨‍💼✨\n\n(Understood! I have paused automated replies and notified our admissions team. A human advisor will reach out to you shortly.)"
             await send_whatsapp_message(number=remote_jid, text=pause_reply)
             sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=pause_reply, is_bot_reply=True)
             return
@@ -338,7 +336,7 @@ async def process_incoming_message(data: Dict[str, Any]):
             logger.info(f"Bot pausado para {phone_number}. Mensaje sincronizado en Odoo CRM para atención humana.")
             return
 
-        # 5. Generar respuesta con IA
+        # 5. Generar respuesta con IA multilingüe
         ai_reply = await generate_ai_reply(phone_number, user_text)
 
         # 6. Enviar respuesta por WhatsApp
@@ -389,7 +387,7 @@ async def view_qr_code():
                     <div class="card">
                         <div class="check">✅</div>
                         <h1>¡WhatsApp Conectado con Éxito!</h1>
-                        <p>El Asistente de IA de Eruvia European Business School está activo y sincronizando conversaciones en tiempo real con Odoo CRM.</p>
+                        <p>El Asistente Multilingüe de Eruvia European Business School está activo y sincronizando conversaciones en tiempo real con Odoo CRM.</p>
                         <span class="badge">Estado: 100% Operativo</span>
                     </div>
                 </body>
@@ -432,7 +430,7 @@ async def view_qr_code():
                         <div class="qr-box">
                             <img src="{base64_img}" alt="Código QR de WhatsApp" />
                         </div>
-                        <div class="footer-text">La página se actualiza automáticamente cada 20 segundos.</div>
+                        <div class="footer-text">La página se actualiza automáticamente cada 20 segundos. Contacto: info@eruviabs.com</div>
                     </div>
                 </body>
                 </html>
