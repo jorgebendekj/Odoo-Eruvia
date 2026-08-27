@@ -81,7 +81,6 @@ def check_human_intervention_needed(text: str) -> bool:
 def is_lead_paused_in_odoo(phone: str) -> bool:
     """
     Verifica si en Odoo CRM el lead activo tiene la etiqueta 'Intervención Humana' o 'Bot Pausado'.
-    Si no existe la etiqueta en Odoo, el bot NO está pausado.
     """
     try:
         uid, models = get_odoo_client()
@@ -106,7 +105,6 @@ def is_lead_paused_in_odoo(phone: str) -> bool:
                             paused_numbers[phone] = True
                             return True
 
-        # Si no tiene etiquetas de pausa en Odoo, despausar
         paused_numbers[phone] = False
         return False
     except Exception as e:
@@ -225,9 +223,9 @@ BASE DE CONOCIMIENTO OFICIAL DE ERUVIA:
 {KNOWLEDGE_BASE}
 
 ESTILO Y COMPORTAMIENTO:
-1. CONVERSACIONAL Y CONSULTIVO: Conversa de forma cálida, profesional, empática e inspiradora. Haz preguntas para conocer los objetivos del alumno (ej. "¿En qué sector o puesto trabajas actualmente?", "¿Qué metas buscas alcanzar con la Inteligencia Artificial?").
+1. CONVERSACIONAL Y CONSULTIVO: Conversa de forma cálida, profesional, empática e inspiradora. Responde directamente la duda del alumno y haz una pregunta abierta para conocerlo mejor (ej. "¿En qué sector trabajas actualmente?", "¿Qué metas buscas alcanzar con la Inteligencia Artificial?").
 2. MULTILINGÜE: Responde siempre en el MISMO idioma que use el usuario (Español, Inglés, Portugués, Francés, etc.).
-3. FORMATO WHATSAPP: Respuestas claras y atractivas con viñetas o emojis sobrios. Evita respuestas excesivamente largas.
+3. FORMATO WHATSAPP: Respuestas claras, persuasivas y con viñetas o emojis sobrios.
 4. ARGUMENTOS DE VALOR: Explica por qué el MBA en Inteligencia Artificial de Eruvia transforma carreras (Tutor de IA Dedicado 24/7, acreditación ANCYPEL, 100% online asíncrono, 9 meses, 799 € o 6 cuotas de 133,17 €, 14 días de garantía incondicional con devolución del 100%).
 5. GUÍA AL SIGUIENTE PASO: Invita cordialmente al alumno a dar el paso, matricularse en la web oficial (https://eruviabs.com/es) o a resolver cualquier duda sobre temario o financiación.
 """
@@ -268,7 +266,7 @@ async def send_whatsapp_message(number: str, text: str):
         "number": number,
         "text": text,
         "options": {
-            "delay": 1200,
+            "delay": 1000,
             "presence": "composing"
         }
     }
@@ -279,17 +277,10 @@ async def send_whatsapp_message(number: str, text: str):
     except Exception as e:
         logger.error(f"Error enviando mensaje por Evolution API: {e}")
 
-async def process_incoming_message(data: Dict[str, Any]):
-    """Procesa el mensaje entrante desde el Webhook de Evolution API."""
+async def handle_single_message_data(payload: Dict[str, Any]):
+    """Procesa un objeto individual de mensaje recibido de WhatsApp."""
     try:
-        raw_event = str(data.get("event", "")).lower().replace("_", ".")
-        if raw_event != "messages.upsert":
-            return
-
-        payload = data.get("data", {})
         key = payload.get("key", {})
-        
-        # Ignorar mensajes enviados por el propio bot
         if key.get("fromMe", False):
             return
 
@@ -306,13 +297,14 @@ async def process_incoming_message(data: Dict[str, Any]):
             msg_content.get("extendedTextMessage", {}).get("text") or
             msg_content.get("ephemeralMessage", {}).get("message", {}).get("conversation") or
             msg_content.get("ephemeralMessage", {}).get("message", {}).get("extendedTextMessage", {}).get("text") or
+            payload.get("messageText") or
             ""
         ).strip()
 
         if not user_text:
             return
 
-        logger.info(f"Mensaje entrante de {sender_name} ({phone_number}): {user_text}")
+        logger.info(f"MENSAJE ENTRANTE DE {sender_name} ({phone_number}): {user_text}")
 
         # 1. Sincronizar mensaje entrante en Odoo CRM
         lead_id = sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=user_text, is_bot_reply=False)
@@ -349,7 +341,33 @@ async def process_incoming_message(data: Dict[str, Any]):
         sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=ai_reply, is_bot_reply=True)
 
     except Exception as e:
-        logger.error(f"Error procesando webhook entrante: {e}", exc_info=True)
+        logger.error(f"Error procesando mensaje individual: {e}", exc_info=True)
+
+async def process_incoming_message(data: Dict[str, Any]):
+    """Procesa el webhook entrante desde Evolution API soportando todas las estructuras."""
+    try:
+        raw_event = str(data.get("event", "")).lower().replace("_", ".")
+        logger.info(f"WEBHOOK_DISPATCH: event={raw_event}")
+
+        if "messages" not in raw_event:
+            return
+
+        payload_data = data.get("data")
+        if isinstance(payload_data, list):
+            for item in payload_data:
+                if isinstance(item, dict):
+                    await handle_single_message_data(item)
+        elif isinstance(payload_data, dict):
+            # Si contiene messages array
+            if "messages" in payload_data and isinstance(payload_data["messages"], list):
+                for m in payload_data["messages"]:
+                    if isinstance(m, dict):
+                        await handle_single_message_data(m)
+            else:
+                await handle_single_message_data(payload_data)
+
+    except Exception as e:
+        logger.error(f"Error procesando webhook general: {e}", exc_info=True)
 
 @app.post("/webhook/evolution")
 async def evolution_webhook(request: Request, background_tasks: BackgroundTasks):
