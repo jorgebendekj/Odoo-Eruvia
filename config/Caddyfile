@@ -1,17 +1,17 @@
 odoo.eruviabs.com {
     encode gzip zstd
 
-    # Capa de Seguridad MCP: Bloquear si no tiene el token autorizado
-    @mcp_unauthorized {
-        path /mcp* /sse* /messages*
-        not method OPTIONS
-        not header x-mcp-token eruvia_sec_8a3f9e2b104c7d6e
-        not header Authorization *eruvia_sec_8a3f9e2b104c7d6e*
-    }
-    respond @mcp_unauthorized `{"jsonrpc":"2.0","id":"unauthorized","error":{"code":-32000,"message":"Acceso denegado: Token de seguridad MCP inválido o no proporcionado. Configura el encabezado 'x-mcp-token' con tu clave autorizada."}}` 401
-
-    # 1. Remote MCP Endpoints
+    # 1. Remote MCP Endpoints con Capa de Seguridad por Token
     handle /mcp* {
+        @no_token_mcp {
+            not method OPTIONS
+            not header x-mcp-token "eruvia_sec_8a3f9e2b104c7d6e"
+            not header Authorization "*eruvia_sec_8a3f9e2b104c7d6e*"
+        }
+        respond @no_token_mcp `{"jsonrpc":"2.0","id":"unauthorized","error":{"code":-32000,"message":"Acceso denegado: Token de seguridad MCP inválido o no proporcionado. Configura el encabezado 'x-mcp-token' con tu clave autorizada."}}` 401 {
+            close
+        }
+
         reverse_proxy remote_mcp:8000 {
             flush_interval -1
             header_up Host {host}
@@ -20,6 +20,15 @@ odoo.eruviabs.com {
     }
 
     handle /sse* {
+        @no_token_sse {
+            not method OPTIONS
+            not header x-mcp-token "eruvia_sec_8a3f9e2b104c7d6e"
+            not header Authorization "*eruvia_sec_8a3f9e2b104c7d6e*"
+        }
+        respond @no_token_sse `{"jsonrpc":"2.0","id":"unauthorized","error":{"code":-32000,"message":"Acceso denegado: Token de seguridad MCP inválido o no proporcionado. Configura el encabezado 'x-mcp-token' con tu clave autorizada."}}` 401 {
+            close
+        }
+
         reverse_proxy remote_mcp:8000 {
             flush_interval -1
             header_up Host {host}
