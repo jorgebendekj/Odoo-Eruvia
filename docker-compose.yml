@@ -7,7 +7,7 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      - DOMAIN_NAME=${DOMAIN_NAME:-crm.eruvia.com}
+      - DOMAIN_NAME=${DOMAIN_NAME:-crm.eruviabs.com}
     volumes:
       - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -23,6 +23,8 @@ services:
     restart: unless-stopped
     depends_on:
       - db
+    ports:
+      - "8069:8069"
     environment:
       - HOST=db
       - USER=odoo

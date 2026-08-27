@@ -1,4 +1,4 @@
-{$DOMAIN_NAME:crm.eruvia.com} {
+{$DOMAIN_NAME:crm.eruviabs.com} {
     encode gzip zstd
 
     # Odoo Longpolling / Websocket
