@@ -1,6 +1,19 @@
 odoo.eruviabs.com {
     encode gzip zstd
 
+    # Capa de Seguridad MCP: Bloquear si no tiene el token autorizado
+    @unauthorized_mcp {
+        path /mcp*
+        path /sse*
+        path /messages*
+        not method OPTIONS
+        not header x-mcp-token "eruvia_sec_8a3f9e2b104c7d6e"
+        not header Authorization "*eruvia_sec_8a3f9e2b104c7d6e*"
+    }
+    respond @unauthorized_mcp `{"jsonrpc":"2.0","id":"unauthorized","error":{"code":-32000,"message":"Acceso denegado: Token de seguridad MCP inválido o no proporcionado. Configura el encabezado 'x-mcp-token' con tu clave autorizada."}}` 401 {
+        close
+    }
+
     # 1. Remote MCP Endpoints
     handle /mcp* {
         reverse_proxy remote_mcp:8000 {

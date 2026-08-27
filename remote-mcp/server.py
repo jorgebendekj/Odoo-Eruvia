@@ -4,13 +4,6 @@ import xmlrpc.client
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-from starlette.applications import Starlette
-from starlette.middleware import Middleware
-from starlette.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
-from starlette.routing import Mount
-import uvicorn
 
 load_dotenv()
 
@@ -19,12 +12,12 @@ ODOO_DB = os.getenv("ODOO_DB", "eruvia")
 ODOO_USERNAME = os.getenv("ODOO_USERNAME", "info@eruviabs.com")
 ODOO_PASSWORD = os.getenv("ODOO_PASSWORD", "Eruvia2026!")
 
-# Lista de tokens autorizados (separados por coma en variable de entorno o por defecto)
-MCP_SECRET_TOKENS = os.getenv("MCP_SECRET_TOKENS", "eruvia_sec_8a3f9e2b104c7d6e").split(",")
-MCP_SECRET_TOKENS = [t.strip() for t in MCP_SECRET_TOKENS if t.strip()]
-
 # Servidor Oficial FastMCP de Anthropic
-mcp = FastMCP("Eruvia Business School ERP & CRM")
+mcp = FastMCP(
+    "Eruvia Business School ERP & CRM",
+    host="0.0.0.0",
+    port=8000
+)
 
 _cached_uid = None
 
@@ -243,66 +236,5 @@ def execute_odoo(model: str, method: str, args: List[Any] = [], kwargs: Dict[str
     uid, models = get_odoo()
     return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, model, method, args, kwargs)
 
-# ==============================================================================
-# CAPA DE SEGURIDAD Y AUTENTICACIÓN POR TOKEN (MCP AUTH MIDDLEWARE)
-# ==============================================================================
-
-class MCPAuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        # Permitir peticiones preflight CORS (OPTIONS)
-        if request.method == "OPTIONS":
-            return await call_next(request)
-
-        # Extraer token de headers o query params
-        auth_header = request.headers.get("Authorization", "")
-        token_header = request.headers.get("x-mcp-token", "")
-        query_token = request.query_params.get("token", "")
-
-        provided_token = ""
-        if auth_header.startswith("Bearer "):
-            provided_token = auth_header.split("Bearer ")[-1].strip()
-        elif token_header:
-            provided_token = token_header.strip()
-        elif query_token:
-            provided_token = query_token.strip()
-
-        # Validar token
-        if not provided_token or provided_token not in MCP_SECRET_TOKENS:
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "jsonrpc": "2.0",
-                    "id": "unauthorized",
-                    "error": {
-                        "code": -32000,
-                        "message": "Acceso denegado: Token de seguridad MCP inválido o no proporcionado. Configura el encabezado 'x-mcp-token' con tu clave autorizada."
-                    }
-                }
-            )
-
-        return await call_next(request)
-
-# Crear app oficial Streamable HTTP con el middleware de seguridad
-streamable_app = mcp.streamable_http_app()
-
-middleware = [
-    Middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-        allow_credentials=True
-    ),
-    Middleware(MCPAuthMiddleware)
-]
-
-protected_app = Starlette(
-    middleware=middleware,
-    routes=[
-        Mount("/mcp", app=streamable_app),
-        Mount("/", app=streamable_app)
-    ]
-)
-
 if __name__ == "__main__":
-    uvicorn.run(protected_app, host="0.0.0.0", port=8000)
+    mcp.run(transport="streamable-http")
