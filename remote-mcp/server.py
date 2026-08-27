@@ -3,7 +3,7 @@ import datetime
 import xmlrpc.client
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
-from fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP
 
 load_dotenv()
 
@@ -12,8 +12,12 @@ ODOO_DB = os.getenv("ODOO_DB", "eruvia")
 ODOO_USERNAME = os.getenv("ODOO_USERNAME", "info@eruviabs.com")
 ODOO_PASSWORD = os.getenv("ODOO_PASSWORD", "Eruvia2026!")
 
-# Instanciar FastMCP
-mcp = FastMCP("Eruvia Business School ERP & CRM")
+# Servidor Oficial FastMCP de Anthropic
+mcp = FastMCP(
+    "Eruvia Business School ERP & CRM",
+    host="0.0.0.0",
+    port=8000
+)
 
 _cached_uid = None
 
@@ -233,4 +237,4 @@ def execute_odoo(model: str, method: str, args: List[Any] = [], kwargs: Dict[str
     return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, model, method, args, kwargs)
 
 if __name__ == "__main__":
-    mcp.run(transport="sse", host="0.0.0.0", port=8000)
+    mcp.run(transport="sse")

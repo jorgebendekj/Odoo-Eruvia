@@ -1,14 +1,14 @@
 odoo.eruviabs.com {
     encode gzip zstd
 
-    # Remote MCP & OAuth Endpoints para Claude Web y Móvil
+    # Remote MCP SSE & Streamable HTTP para Claude Web y Móvil
     @mcp {
         path /sse*
         path /messages*
-        path /oauth*
-        path /.well-known*
     }
-    reverse_proxy @mcp remote_mcp:8000
+    reverse_proxy @mcp remote_mcp:8000 {
+        flush_interval -1
+    }
 
     # Odoo Longpolling / Websocket
     @websocket {
