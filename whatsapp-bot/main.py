@@ -28,8 +28,8 @@ EVOLUTION_URL = os.getenv("EVOLUTION_URL", "http://evolution_api:8080").rstrip("
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "eruvia_secret_token_2026")
 EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "eruvia")
 
-# Configuración IA (OpenAI / DeepSeek / Hugging Face / Moonshot)
-AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
+# Configuración IA (OpenAI / Groq / DeepSeek / Hugging Face / OpenRouter)
+AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 AI_API_KEY = os.getenv("AI_API_KEY", "")
 AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
 
@@ -81,7 +81,6 @@ def check_human_intervention_needed(text: str) -> bool:
 def is_lead_paused_in_odoo(phone: str) -> bool:
     """
     Verifica dinámicamente en Odoo CRM si el lead tiene la etiqueta 'Intervención Humana' o 'Bot Pausado'.
-    Permite al asesor humano pausar o despausar el bot directamente desde la interfaz web de Odoo.
     """
     try:
         uid, models = get_odoo_client()
@@ -105,7 +104,6 @@ def is_lead_paused_in_odoo(phone: str) -> bool:
                             paused_numbers[phone] = True
                             return True
 
-                # Si el asesor en Odoo eliminó la etiqueta, se reactiva automáticamente el bot
                 paused_numbers[phone] = False
                 return False
     except Exception as e:
@@ -137,7 +135,6 @@ def set_human_intervention_in_odoo(phone: str, sender_name: str, lead_id: int):
         <div style="background:#fee2e2;border-left:4px solid #ef4444;padding:12px;border-radius:6px;margin:8px 0;">
             <p style="margin:0;color:#991b1b;font-weight:bold;font-size:14px;">🚨 ATENCIÓN REQUERIDA: Intervención Humana Solicitada</p>
             <p style="margin:5px 0 0;color:#7f1d1d;font-size:13px;">El alumno <b>{sender_name or phone}</b> ha solicitado hablar con un asesor. Las respuestas automáticas de la IA han sido <b>PAUSADAS</b> para este contacto.</p>
-            <p style="margin:6px 0 0;color:#57534e;font-size:11px;"><em>Tip: Puedes reactivar a la IA en cualquier momento quitando la etiqueta 'Intervención Humana' o escribiendo /activar.</em></p>
         </div>
         """
         models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "mail.message", "create", [{
@@ -202,7 +199,7 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
             logger.info(f"Nueva oportunidad creada en Odoo CRM: ID {lead_id} ({lead_title})")
 
         author = "🤖 Asistente Virtual Eruvia" if is_bot_reply else f"📱 Alumno ({sender_name or clean_phone})"
-        body_msg = f"<p><b>{author}:</b></p><p><em>{message_text}</em></p>"
+        body_msg = f"<p><b>{author}:</b></p><p><pre style='white-space:pre-wrap;font-family:inherit;'>{message_text}</pre></p>"
         models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "mail.message", "create", [{
             "model": "crm.lead",
             "res_id": lead_id,
@@ -217,29 +214,26 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
         return None
 
 async def generate_ai_reply(phone: str, user_message: str) -> str:
-    """Genera una respuesta inteligente multilingüe utilizando el proveedor de IA configurado."""
+    """Genera una respuesta inteligente y consultiva utilizando el motor de IA."""
     if not AI_API_KEY:
-        return "¡Hola! Gracias por comunicarte con Eruvia European Business School. En breve uno de nuestros asesores académicos te atenderá personalmente. (Contact: info@eruviabs.com)"
+        return (
+            "¡Hola! 👋 Qué gusto saludarte. Soy el asesor académico de Eruvia European Business School.\n\n"
+            "¿Cómo te puedo ayudar hoy? ¿Te gustaría conocer los detalles de nuestro MBA en Inteligencia Artificial o estás buscando potenciar algún área específica de tu carrera?"
+        )
 
     client = OpenAI(base_url=AI_BASE_URL, api_key=AI_API_KEY)
     
-    system_prompt = f"""You are the official Multilingual Academic & Admissions Advisor at Eruvia European Business School (Your AI Native Business School, official member of ANCYPEL).
+    system_prompt = f"""Eres el Asesor Académico y de Admisiones oficial de Eruvia European Business School (Your AI Native Business School, miembro de ANCYPEL).
 
-OFFICIAL KNOWLEDGE BASE:
+BASE DE CONOCIMIENTO DE ERUVIA:
 {KNOWLEDGE_BASE}
 
-CORE DIRECTIVES:
-1. MULTILINGUAL FLUENCY: Always detect the language of the prospective student and answer natively in THAT EXACT SAME LANGUAGE (Spanish, English, Portuguese, French, German, Italian, etc.). If the user switches languages, switch smoothly.
-2. TONE & STYLE: Warm, inspiring, professional, empathetic, and consultative.
-3. WHATSAPP FORMAT: Concise, clear, easy-to-read messages (maximum 2-3 short paragraphs or clean bullet points). Avoid huge walls of text.
-4. KEY VALUE PROPOSITIONS OF ERUVIA:
-   - 100% Online & Flexible European Master's Degree (9 Months).
-   - Dedicated 24/7 AI Tutor + Daily faculty guidance by top tech industry executives.
-   - Quality backing as an official member of ANCYPEL (founded 1977).
-   - Special Promotional Tuition: 799 € (regular 999 €) or 6 monthly installments of 133.17 € without predatory interest via Stripe.
-   - 14-Day Unconditional Money-Back Guarantee (100% refund writing to info@eruviabs.com).
-   - Official contact email: info@eruviabs.com.
-5. CALL TO ACTION: Encourage the student to share their background, goals, or questions, and help them take the next step to enroll or connect with admissions.
+ESTILO Y COMPORTAMIENTO:
+1. CONVERSACIONAL Y CONSULTIVO: No respondas de forma fría ni envíes correos de golpe. Conversa de manera cercana, empática e inspiradora. Haz preguntas abiertas para conocer al alumno (ej. "¿En qué área te desempeñas actualmente?", "¿Qué objetivos profesionales tienes en mente?").
+2. MULTILINGÜE: Responde siempre en el MISMO idioma que use el usuario (Español, Inglés, Portugués, Francés, etc.).
+3. FORMATO WHATSAPP: Respuestas claras, agradables y bien formateadas con viñetas o emojis sobrios. Evita textos interminables.
+4. ASESORÍA DE VALOR: Explica por qué el MBA en Inteligencia Artificial de Eruvia transforma carreras (Tutor IA 24/7, acreditación ANCYPEL, 100% online, 9 meses, 799 € o 6 cuotas de 133,17 €, 14 días de garantía incondicional).
+5. GUÍA AL SIGUIENTE PASO: Cuando el alumno esté listo, anímale a matricularse en la web o consultar si tiene dudas sobre temario o financiación.
 """
     history = conversation_history.get(phone, [])
     messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": user_message}]
@@ -249,7 +243,7 @@ CORE DIRECTIVES:
             model=AI_MODEL,
             messages=messages,
             temperature=0.7,
-            max_tokens=500
+            max_tokens=600
         )
         reply = response.choices[0].message.content.strip()
 
@@ -260,7 +254,10 @@ CORE DIRECTIVES:
         return reply
     except Exception as e:
         logger.error(f"Error llamando al motor de IA ({AI_BASE_URL} / {AI_MODEL}): {e}")
-        return "¡Hola! Gracias por comunicarte con Eruvia European Business School. Hemos recibido tu mensaje y en breves momentos un asesor de admisiones te atenderá con gusto. (Email: info@eruviabs.com)"
+        return (
+            "¡Hola! 👋 Qué gusto saludarte. Soy el asesor de admisiones de Eruvia European Business School.\n\n"
+            "¿En qué te puedo ayudar hoy? ¿Te gustaría conocer más sobre el contenido y metodología de nuestro MBA en Inteligencia Artificial o sobre las opciones de financiación?"
+        )
 
 async def send_whatsapp_message(number: str, text: str):
     """Envía un mensaje de texto a través de Evolution API."""
@@ -294,6 +291,7 @@ async def process_incoming_message(data: Dict[str, Any]):
         payload = data.get("data", {})
         key = payload.get("key", {})
         
+        # Ignorar mensajes enviados por el propio bot
         if key.get("fromMe", False):
             return
 
@@ -322,7 +320,7 @@ async def process_incoming_message(data: Dict[str, Any]):
         # 2. Comando para reactivar el bot si estaba pausado
         if user_text.lower() in ["/activar", "/bot", "/iniciar", "menu", "/start"]:
             paused_numbers[phone_number] = False
-            reactivate_msg = "¡Hola de nuevo! Asistente virtual de Eruvia reactivado. ¿En qué te puedo ayudar hoy sobre nuestros programas o admisiones? / Hello! Eruvia virtual assistant reactivated. How can I help you today?"
+            reactivate_msg = "¡Hola de nuevo! 👋 Asistente virtual de Eruvia reactivado. ¿En qué te puedo ayudar hoy sobre nuestro MBA o admisiones?"
             await send_whatsapp_message(number=remote_jid, text=reactivate_msg)
             sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=reactivate_msg, is_bot_reply=True)
             return
@@ -331,17 +329,17 @@ async def process_incoming_message(data: Dict[str, Any]):
         if check_human_intervention_needed(user_text):
             if lead_id:
                 set_human_intervention_in_odoo(phone_number, sender_name, lead_id)
-            pause_reply = "¡Entendido! He pausado mis respuestas automáticas y he notificado a nuestro equipo de admisiones. Un asesor humano de Eruvia revisará esta conversación y se comunicará contigo por aquí en breve. 👨‍💼✨\n\n(Understood! I have paused automated replies and notified our admissions team. A human advisor will reach out to you shortly.)"
+            pause_reply = "¡Entendido! He pausado mis respuestas automáticas y he notificado a nuestro equipo de admisiones. Un asesor humano de Eruvia revisará esta conversación y se comunicará contigo por aquí en breve. 👨‍💼✨"
             await send_whatsapp_message(number=remote_jid, text=pause_reply)
             sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=pause_reply, is_bot_reply=True)
             return
 
         # 4. Comprobar si la IA está pausada desde Odoo (por etiqueta del asesor en CRM)
         if is_lead_paused_in_odoo(phone_number):
-            logger.info(f"Bot pausado para {phone_number} (Control humano activo en Odoo). Mensaje sincronizado en CRM.")
+            logger.info(f"Bot pausado para {phone_number} (Control humano activo en Odoo). Mensaje registrado en CRM.")
             return
 
-        # 5. Generar respuesta con IA multilingüe
+        # 5. Generar respuesta con IA interactiva y consultiva
         ai_reply = await generate_ai_reply(phone_number, user_text)
 
         # 6. Enviar respuesta por WhatsApp
