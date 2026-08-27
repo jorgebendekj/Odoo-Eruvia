@@ -1,6 +1,13 @@
 odoo.eruviabs.com {
     encode gzip zstd
 
+    # Remote MCP Endpoints (SSE y Mensajes)
+    @mcp {
+        path /sse*
+        path /messages*
+    }
+    reverse_proxy @mcp remote_mcp:8000
+
     # Odoo Longpolling / Websocket
     @websocket {
         header Connection *Upgrade*

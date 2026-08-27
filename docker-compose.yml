@@ -7,13 +7,14 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      - DOMAIN_NAME=${DOMAIN_NAME:-crm.eruviabs.com}
+      - DOMAIN_NAME=${DOMAIN_NAME:-odoo.eruviabs.com}
     volumes:
       - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
       - odoo
+      - remote_mcp
     networks:
       - eruvia_net
 
@@ -102,8 +103,8 @@ services:
     environment:
       - ODOO_URL=http://odoo:8069
       - ODOO_DB=eruvia
-      - ODOO_USERNAME=admin
-      - ODOO_PASSWORD=${ODOO_ADMIN_PASSWORD:-admin}
+      - ODOO_USERNAME=info@eruviabs.com
+      - ODOO_PASSWORD=Eruvia2026!
       - EVOLUTION_URL=http://evolution_api:8080
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-eruvia_secret_token_2026}
       - EVOLUTION_INSTANCE=eruvia
@@ -113,6 +114,24 @@ services:
     depends_on:
       - odoo
       - evolution_api
+    networks:
+      - eruvia_net
+
+  remote_mcp:
+    build:
+      context: ./remote-mcp
+      dockerfile: Dockerfile
+    container_name: eruvia_remote_mcp
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ODOO_URL=http://odoo:8069
+      - ODOO_DB=eruvia
+      - ODOO_USERNAME=info@eruviabs.com
+      - ODOO_PASSWORD=Eruvia2026!
+    depends_on:
+      - odoo
     networks:
       - eruvia_net
 
