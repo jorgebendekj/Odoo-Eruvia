@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import time
 import logging
 import xmlrpc.client
@@ -40,13 +41,13 @@ KNOWLEDGE_BASE = ""
 if KB_PATH.exists():
     KNOWLEDGE_BASE = KB_PATH.read_text(encoding="utf-8")
 
-# Memoria de conversación compacta (últimos 4 mensajes por número para máxima eficiencia de tokens)
+# Memoria de conversación compacta (últimos 4 mensajes por número)
 conversation_history: Dict[str, List[Dict[str, str]]] = {}
 
 # Set de números pausados manualmente
 paused_numbers: Dict[str, bool] = {}
 
-# Cache de deduplicación de mensajes (msg_id -> timestamp) para evitar respuestas duplicadas
+# Cache de deduplicación de mensajes (msg_id -> timestamp)
 processed_message_ids: Dict[str, float] = {}
 
 app = FastAPI(title="Eruvia WhatsApp AI Bot & Admissions Agent")
@@ -92,10 +93,9 @@ def is_lead_paused_in_odoo(phone: str) -> bool:
             return False
 
         clean_phone = re.sub(r"[^\d+]", "", phone)
-        lead_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "search", [
-            ["|", ("phone", "ilike", clean_phone[-9:]), ("mobile", "ilike", clean_phone[-9:])],
-            ("probability", "<", 100)
-        ], {"limit": 1})
+        # Dominio correcto en una sola lista
+        lead_domain = ["|", ("phone", "ilike", clean_phone[-9:]), ("mobile", "ilike", clean_phone[-9:]), ("probability", "<", 100)]
+        lead_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "search", [lead_domain], {"limit": 1})
 
         if lead_ids:
             lead = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "read", [lead_ids], {"fields": ["tag_ids"]})
@@ -221,23 +221,21 @@ async def generate_ai_reply(phone: str, user_message: str) -> str:
     """Genera una respuesta inteligente, consultiva y con máxima eficiencia de tokens."""
     client = OpenAI(base_url=AI_BASE_URL, api_key=AI_API_KEY)
     
-    # Prompt optimizado para máxima economía de tokens sin perder información clave
     system_prompt = f"""Eres el Asesor Académico oficial de Eruvia European Business School (Your AI Native Business School, miembro de ANCYPEL).
 
 DATOS CLAVE:
-- MBA en IA: Título propio europeo 100% online (9 meses).
+- MBA en IA: Título propio europeo 100% online y flexible (9 meses).
 - Aval: Acreditación oficial ANCYPEL.
 - Innovación: Tutor IA 24/7 + feedback docente diario + Masterclasses en vivo en HD.
 - Precio: 799 € promocional (regular 999 €) o 6 cuotas de 133,17 €/mes sin intereses.
 - Garantía: 14 días con devolución 100% (info@eruviabs.com).
-- Web: https://eruviabs.com/es
+- Web oficial: https://eruviabs.com/es
 
 DIRECTRICES:
-1. Responde de forma empática, profesional y directa en el MISMO idioma del usuario.
+1. Responde de forma empática, profesional, cercana y directa en el MISMO idioma del usuario.
 2. Formato conciso (1-2 párrafos cortos o viñetas limpias).
 3. Haz una pregunta de cierre para guiar al alumno.
 """
-    # Mantener solo los últimos 4 mensajes (2 turnos) para ahorrar tokens de entrada
     history = conversation_history.get(phone, [])[-4:]
     messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": user_message}]
 
@@ -246,14 +244,13 @@ DIRECTRICES:
             model=AI_MODEL,
             messages=messages,
             temperature=0.7,
-            max_tokens=250 # Límite estricto para no gastar tokens innecesarios
+            max_tokens=250
         )
         msg_obj = response.choices[0].message
         reply = (msg_obj.content or "").strip()
         if not reply and hasattr(msg_obj, "reasoning_content") and msg_obj.reasoning_content:
             reply = msg_obj.reasoning_content.strip()
 
-        # Guardar en memoria compacta
         history.append({"role": "user", "content": user_message})
         history.append({"role": "assistant", "content": reply})
         conversation_history[phone] = history[-4:]
@@ -397,8 +394,19 @@ async def process_incoming_message(data: Dict[str, Any]):
 
 @app.post("/webhook/evolution")
 async def evolution_webhook(request: Request, background_tasks: BackgroundTasks):
-    """Endpoint receptor del webhook de Evolution API."""
-    data = await request.json()
+    """Endpoint receptor robusto del webhook de Evolution API."""
+    try:
+        raw_body = await request.body()
+        if not raw_body:
+            return {"status": "empty"}
+        try:
+            data = json.loads(raw_body.decode("utf-8", errors="replace"))
+        except Exception:
+            data = await request.json()
+    except Exception as e:
+        logger.error(f"Error parseando JSON del webhook: {e}")
+        return {"status": "error", "detail": str(e)}
+
     background_tasks.add_task(process_incoming_message, data)
     return {"status": "received"}
 
