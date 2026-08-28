@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import logging
 import xmlrpc.client
 from typing import Dict, List, Any, Optional
@@ -39,11 +40,14 @@ KNOWLEDGE_BASE = ""
 if KB_PATH.exists():
     KNOWLEDGE_BASE = KB_PATH.read_text(encoding="utf-8")
 
-# Memoria de conversación en memoria (últimos 10 mensajes por número)
+# Memoria de conversación compacta (últimos 4 mensajes por número para máxima eficiencia de tokens)
 conversation_history: Dict[str, List[Dict[str, str]]] = {}
 
 # Set de números pausados manualmente
 paused_numbers: Dict[str, bool] = {}
+
+# Cache de deduplicación de mensajes (msg_id -> timestamp) para evitar respuestas duplicadas
+processed_message_ids: Dict[str, float] = {}
 
 app = FastAPI(title="Eruvia WhatsApp AI Bot & Admissions Agent")
 
@@ -214,42 +218,49 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
         return None
 
 async def generate_ai_reply(phone: str, user_message: str) -> str:
-    """Genera una respuesta inteligente y consultiva utilizando Kimi K3 de Moonshot AI."""
+    """Genera una respuesta inteligente, consultiva y con máxima eficiencia de tokens."""
     client = OpenAI(base_url=AI_BASE_URL, api_key=AI_API_KEY)
     
-    system_prompt = f"""Eres el Asesor Académico y de Admisiones oficial de Eruvia European Business School (Your AI Native Business School, miembro de ANCYPEL).
+    # Prompt optimizado para máxima economía de tokens sin perder información clave
+    system_prompt = f"""Eres el Asesor Académico oficial de Eruvia European Business School (Your AI Native Business School, miembro de ANCYPEL).
 
-BASE DE CONOCIMIENTO OFICIAL DE ERUVIA:
-{KNOWLEDGE_BASE}
+DATOS CLAVE:
+- MBA en IA: Título propio europeo 100% online (9 meses).
+- Aval: Acreditación oficial ANCYPEL.
+- Innovación: Tutor IA 24/7 + feedback docente diario + Masterclasses en vivo en HD.
+- Precio: 799 € promocional (regular 999 €) o 6 cuotas de 133,17 €/mes sin intereses.
+- Garantía: 14 días con devolución 100% (info@eruviabs.com).
+- Web: https://eruviabs.com/es
 
-ESTILO Y COMPORTAMIENTO:
-1. CONVERSACIONAL Y CONSULTIVO: Conversa de forma cálida, profesional, empática e inspiradora. Responde directamente la duda del alumno y haz una pregunta abierta para conocerlo mejor (ej. "¿En qué sector trabajas actualmente?", "¿Qué metas buscas alcanzar con la Inteligencia Artificial?").
-2. MULTILINGÜE: Responde siempre en el MISMO idioma que use el usuario (Español, Inglés, Portugués, Francés, etc.).
-3. FORMATO WHATSAPP: Respuestas claras, persuasivas y con viñetas o emojis sobrios.
-4. ARGUMENTOS DE VALOR: Explica por qué el MBA en Inteligencia Artificial de Eruvia transforma carreras (Tutor de IA Dedicado 24/7, acreditación ANCYPEL, 100% online asíncrono, 9 meses, 799 € o 6 cuotas de 133,17 €, 14 días de garantía incondicional con devolución del 100%).
-5. GUÍA AL SIGUIENTE PASO: Invita cordialmente al alumno a dar el paso, matricularse en la web oficial (https://eruviabs.com/es) o a resolver cualquier duda sobre temario o financiación.
+DIRECTRICES:
+1. Responde de forma empática, profesional y directa en el MISMO idioma del usuario.
+2. Formato conciso (1-2 párrafos cortos o viñetas limpias).
+3. Haz una pregunta de cierre para guiar al alumno.
 """
-    history = conversation_history.get(phone, [])
+    # Mantener solo los últimos 4 mensajes (2 turnos) para ahorrar tokens de entrada
+    history = conversation_history.get(phone, [])[-4:]
     messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": user_message}]
 
     try:
         response = client.chat.completions.create(
             model=AI_MODEL,
             messages=messages,
-            temperature=0.7
+            temperature=0.7,
+            max_tokens=250 # Límite estricto para no gastar tokens innecesarios
         )
         msg_obj = response.choices[0].message
         reply = (msg_obj.content or "").strip()
         if not reply and hasattr(msg_obj, "reasoning_content") and msg_obj.reasoning_content:
             reply = msg_obj.reasoning_content.strip()
 
+        # Guardar en memoria compacta
         history.append({"role": "user", "content": user_message})
         history.append({"role": "assistant", "content": reply})
-        conversation_history[phone] = history[-10:]
+        conversation_history[phone] = history[-4:]
 
         return reply
     except Exception as e:
-        logger.error(f"Error llamando a Kimi-K3 ({AI_BASE_URL} / {AI_MODEL}): {e}")
+        logger.error(f"Error llamando a LLM ({AI_BASE_URL} / {AI_MODEL}): {e}")
         return (
             "¡Hola! 👋 Qué gusto saludarte. Soy el asesor de admisiones de Eruvia European Business School.\n\n"
             "¿En qué te puedo ayudar hoy? ¿Te gustaría conocer más sobre el contenido y metodología de nuestro MBA en Inteligencia Artificial o sobre las opciones de financiación?"
@@ -278,15 +289,33 @@ async def send_whatsapp_message(number: str, text: str):
         logger.error(f"Error enviando mensaje por Evolution API: {e}")
 
 async def handle_single_message_data(payload: Dict[str, Any]):
-    """Procesa un objeto individual de mensaje recibido de WhatsApp."""
+    """Procesa un objeto individual de mensaje recibido de WhatsApp con deduplicación estricta."""
     try:
         key = payload.get("key", {})
+        
+        # Ignorar mensajes salientes enviados por el propio bot
         if key.get("fromMe", False):
             return
 
         remote_jid = key.get("remoteJid", "")
-        if not remote_jid or "@g.us" in remote_jid:
+        if not remote_jid or "@g.us" in remote_jid: # Ignorar grupos
             return
+
+        msg_id = key.get("id", "")
+        now = time.time()
+
+        # 🛑 DEDUPLICACIÓN ESTRICTA: Si este mensaje ya se procesó en los últimos 5 minutos, ignorar
+        if msg_id:
+            if msg_id in processed_message_ids and (now - processed_message_ids[msg_id]) < 300:
+                logger.info(f"Mensaje duplicado ignorado (msg_id={msg_id})")
+                return
+            processed_message_ids[msg_id] = now
+
+        # Limpiar IDs viejos de la memoria de deduplicación
+        if len(processed_message_ids) > 1000:
+            for k in list(processed_message_ids.keys())[:200]:
+                if now - processed_message_ids[k] > 300:
+                    processed_message_ids.pop(k, None)
 
         phone_number = remote_jid.split("@")[0]
         sender_name = payload.get("pushName", "")
@@ -304,7 +333,7 @@ async def handle_single_message_data(payload: Dict[str, Any]):
         if not user_text:
             return
 
-        logger.info(f"MENSAJE ENTRANTE DE {sender_name} ({phone_number}): {user_text}")
+        logger.info(f"MENSAJE PROCESADO: {sender_name} ({phone_number}): {user_text}")
 
         # 1. Sincronizar mensaje entrante en Odoo CRM
         lead_id = sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=user_text, is_bot_reply=False)
@@ -331,7 +360,7 @@ async def handle_single_message_data(payload: Dict[str, Any]):
             logger.info(f"Bot pausado para {phone_number} (Control humano activo en Odoo). Mensaje registrado en CRM.")
             return
 
-        # 5. Generar respuesta con Kimi K3 (Moonshot AI)
+        # 5. Generar respuesta con IA eficiente
         ai_reply = await generate_ai_reply(phone_number, user_text)
 
         # 6. Enviar respuesta por WhatsApp
@@ -347,8 +376,6 @@ async def process_incoming_message(data: Dict[str, Any]):
     """Procesa el webhook entrante desde Evolution API soportando todas las estructuras."""
     try:
         raw_event = str(data.get("event", "")).lower().replace("_", ".")
-        logger.info(f"WEBHOOK_DISPATCH: event={raw_event}")
-
         if "messages" not in raw_event:
             return
 
@@ -358,7 +385,6 @@ async def process_incoming_message(data: Dict[str, Any]):
                 if isinstance(item, dict):
                     await handle_single_message_data(item)
         elif isinstance(payload_data, dict):
-            # Si contiene messages array
             if "messages" in payload_data and isinstance(payload_data["messages"], list):
                 for m in payload_data["messages"]:
                     if isinstance(m, dict):
