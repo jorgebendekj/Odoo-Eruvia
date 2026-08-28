@@ -28,10 +28,10 @@ EVOLUTION_URL = os.getenv("EVOLUTION_URL", "http://evolution_api:8080").rstrip("
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "eruvia_secret_token_2026")
 EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "eruvia")
 
-# Configuración IA (Kimi-K3 / Moonshot AI via Hugging Face Router)
+# Configuración IA (Llama-3.3-70B via Hugging Face Router PRO)
 AI_BASE_URL = os.getenv("AI_BASE_URL", "https://router.huggingface.co/v1").rstrip("/")
 AI_API_KEY = os.getenv("AI_API_KEY", "")
-AI_MODEL = os.getenv("AI_MODEL", "moonshotai/Kimi-K3:together")
+AI_MODEL = os.getenv("AI_MODEL", "meta-llama/Llama-3.3-70B-Instruct:together")
 
 # Cargar base de conocimiento
 KB_PATH = Path(__file__).parent / "knowledge_base.md"
