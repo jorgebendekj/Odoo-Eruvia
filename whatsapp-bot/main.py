@@ -152,6 +152,32 @@ def set_human_intervention_in_odoo(phone: str, sender_name: str, lead_id: int):
     except Exception as e:
         logger.error(f"Error marcando intervención humana en Odoo: {e}")
 
+def remove_human_intervention_in_odoo(phone: str, lead_id: int):
+    """Elimina las etiquetas de pausa en Odoo y reactiva la IA para el lead."""
+    try:
+        uid, models = get_odoo_client()
+        if not uid or not lead_id:
+            return
+
+        paused_numbers[phone] = False
+
+        lead = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "read", [[lead_id]], {"fields": ["tag_ids"]})
+        if lead and lead[0].get("tag_ids"):
+            tags = lead[0]["tag_ids"]
+            tag_records = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.tag", "read", [tags], {"fields": ["name"]})
+            tags_to_remove = []
+            for t in tag_records:
+                name = t.get("name", "").lower()
+                if "humano" in name or "pausa" in name or "asesor" in name or "human" in name:
+                    tags_to_remove.append(t["id"])
+            
+            if tags_to_remove:
+                write_commands = [(3, tid) for tid in tags_to_remove]
+                models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "write", [[lead_id], {"tag_ids": write_commands}])
+                logger.info(f"Etiquetas de pausa removidas en Odoo para el lead {lead_id}.")
+    except Exception as e:
+        logger.error(f"Error removiendo etiquetas de pausa en Odoo: {e}")
+
 def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply: bool = False) -> Optional[int]:
     """
     Busca o crea el contacto y la oportunidad en Odoo CRM,
@@ -338,6 +364,8 @@ async def handle_single_message_data(payload: Dict[str, Any]):
         # 2. Comando para reactivar el bot si estaba pausado
         if user_text.lower() in ["/activar", "/bot", "/iniciar", "menu", "/start"]:
             paused_numbers[phone_number] = False
+            if lead_id:
+                remove_human_intervention_in_odoo(phone_number, lead_id)
             reactivate_msg = "¡Hola de nuevo! 👋 Asistente virtual de Eruvia reactivado. ¿En qué te puedo ayudar hoy sobre nuestro MBA o admisiones?"
             await send_whatsapp_message(number=remote_jid, text=reactivate_msg)
             sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=reactivate_msg, is_bot_reply=True)
