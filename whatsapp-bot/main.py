@@ -183,8 +183,11 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
         logger.error(f"Error sincronizando con Odoo: {e}")
         return None
 
+# Cache simple de deduplicación de eventos repetidos
+processed_message_ids: Dict[str, float] = {}
+
 async def generate_ai_reply(phone: str, user_message: str) -> str:
-    """Genera una respuesta inteligente y consultiva utilizando Llama-3.3-70B."""
+    """Genera una respuesta inteligente y consultiva utilizando Llama-3.3-70B con fallback automático."""
     client = OpenAI(base_url=AI_BASE_URL, api_key=AI_API_KEY)
     
     system_prompt = f"""Eres el Asesor Académico y de Admisiones oficial de Eruvia European Business School (Your AI Native Business School, miembro de ANCYPEL).
@@ -195,39 +198,47 @@ BASE DE CONOCIMIENTO OFICIAL DE ERUVIA:
 ESTILO Y COMPORTAMIENTO:
 1. CONVERSACIONAL Y CONSULTIVO: Conversa de forma cálida, profesional, empática e inspiradora. Responde directamente la duda del alumno y haz una pregunta abierta para conocerlo mejor.
 2. MULTILINGÜE: Responde siempre en el MISMO idioma que use el usuario (Español, Inglés, Portugués, Francés, etc.).
-3. FORMATO WHATSAPP: Respuestas claras, persuasivas y con viñetas o emojis sobrios.
+3. FORMATO WHATSAPP CONCISO: Respuestas claras, persuasivas y directas (1-2 párrafos o viñetas cortas). NO listes los 10 módulos completos a menos que el usuario pregunte específicamente por el temario detallado.
 4. ARGUMENTOS DE VALOR: Explica por qué el MBA en Inteligencia Artificial de Eruvia transforma carreras (Tutor de IA Dedicado 24/7, acreditación ANCYPEL, 100% online asíncrono, 9 meses, 799 € o 6 cuotas de 133,17 €, 14 días de garantía incondicional con devolución del 100%).
 5. GUÍA AL SIGUIENTE PASO: Invita cordialmente al alumno a matricularse en la web oficial (https://eruviabs.com/es) o a resolver cualquier duda sobre temario o financiación.
 """
     history = conversation_history.get(phone, [])
     messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": user_message}]
 
-    try:
-        response = client.chat.completions.create(
-            model=AI_MODEL,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=300
-        )
-        msg_obj = response.choices[0].message
-        reply = (msg_obj.content or "").strip()
-        if not reply and hasattr(msg_obj, "reasoning_content") and msg_obj.reasoning_content:
-            reply = msg_obj.reasoning_content.strip()
+    models_to_try = [
+        AI_MODEL,
+        "meta-llama/Llama-3.1-70B-Instruct",
+        "Qwen/Qwen2.5-72B-Instruct"
+    ]
 
-        history.append({"role": "user", "content": user_message})
-        history.append({"role": "assistant", "content": reply})
-        conversation_history[phone] = history[-6:]
+    for model_name in models_to_try:
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=600
+            )
+            msg_obj = response.choices[0].message
+            reply = (msg_obj.content or "").strip()
+            if not reply and hasattr(msg_obj, "reasoning_content") and msg_obj.reasoning_content:
+                reply = msg_obj.reasoning_content.strip()
 
-        return reply
-    except Exception as e:
-        logger.error(f"Error llamando a LLM: {e}")
-        return (
-            "¡Hola! 👋 Qué gusto saludarte. Soy el asesor de admisiones de Eruvia European Business School.\n\n"
-            "¿En qué te puedo ayudar hoy? ¿Te gustaría conocer más sobre el contenido y metodología de nuestro MBA en Inteligencia Artificial o sobre las opciones de financiación?"
-        )
+            if reply:
+                history.append({"role": "user", "content": user_message})
+                history.append({"role": "assistant", "content": reply})
+                conversation_history[phone] = history[-6:]
+                return reply
+        except Exception as e:
+            logger.warning(f"Error con modelo {model_name}: {e}. Probando fallback si aplica...")
+
+    return (
+        "¡Hola! 👋 Qué gusto saludarte. Soy el asesor de admisiones de Eruvia European Business School.\n\n"
+        "¿En qué te puedo ayudar hoy? ¿Te gustaría conocer más sobre el contenido y metodología de nuestro MBA en Inteligencia Artificial o sobre las opciones de financiación?"
+    )
 
 async def send_whatsapp_message(number: str, text: str):
-    """Envía un mensaje de texto a través de Evolution API."""
+    """Envía un mensaje de texto a través de Evolution API con control de logs."""
     url = f"{EVOLUTION_URL}/message/sendText/{EVOLUTION_INSTANCE}"
     headers = {
         "apikey": EVOLUTION_API_KEY,
@@ -244,12 +255,15 @@ async def send_whatsapp_message(number: str, text: str):
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(url, json=payload, headers=headers)
-            logger.info(f"Mensaje enviado a {number}. Status: {resp.status_code}")
+            if resp.status_code in [200, 201]:
+                logger.info(f"Mensaje enviado con éxito a {number}. Status: {resp.status_code}")
+            else:
+                logger.error(f"Fallo enviando mensaje a {number}. Status: {resp.status_code}, Body: {resp.text}")
     except Exception as e:
-        logger.error(f"Error enviando mensaje por Evolution API: {e}")
+        logger.error(f"Error enviando mensaje por Evolution API: {e}", exc_info=True)
 
 async def handle_single_message_data(payload: Dict[str, Any]):
-    """Procesa un objeto individual de mensaje recibido de WhatsApp directamente sin buffers."""
+    """Procesa un objeto individual de mensaje recibido de WhatsApp directamente."""
     try:
         key = payload.get("key", {})
         if key.get("fromMe", False):
@@ -258,6 +272,13 @@ async def handle_single_message_data(payload: Dict[str, Any]):
         remote_jid = key.get("remoteJid", "")
         if not remote_jid or "@g.us" in remote_jid:
             return
+
+        msg_id = key.get("id", "")
+        if msg_id:
+            now = time.time()
+            if msg_id in processed_message_ids and (now - processed_message_ids[msg_id]) < 180:
+                return
+            processed_message_ids[msg_id] = now
 
         phone_number = remote_jid.split("@")[0]
         sender_name = payload.get("pushName", "")
