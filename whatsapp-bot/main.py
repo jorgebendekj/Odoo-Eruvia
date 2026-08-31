@@ -421,6 +421,17 @@ async def handle_single_message_data(payload: Dict[str, Any]):
         msg_id = key.get("id", "")
         now = time.time()
 
+        # 🛑 FILTRAR MENSAJES HISTÓRICOS: Si el mensaje tiene más de 90 segundos, es sincronización vieja
+        msg_timestamp = payload.get("messageTimestamp")
+        if msg_timestamp:
+            try:
+                msg_time = float(msg_timestamp)
+                if (now - msg_time) > 90:
+                    logger.info(f"Mensaje histórico ignorado (timestamp={msg_time}, diff={now - msg_time:.1f}s)")
+                    return
+            except Exception:
+                pass
+
         # 🛑 DEDUPLICACIÓN ESTRICTA: Si este id de mensaje ya se procesó en los últimos 5 minutos, ignorar
         if msg_id:
             if msg_id in processed_message_ids and (now - processed_message_ids[msg_id]) < 300:
