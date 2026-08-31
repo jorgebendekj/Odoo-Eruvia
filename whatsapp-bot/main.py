@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import asyncio
 import logging
 import xmlrpc.client
 from typing import Dict, List, Any, Optional
@@ -29,7 +30,7 @@ EVOLUTION_URL = os.getenv("EVOLUTION_URL", "http://evolution_api:8080").rstrip("
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "eruvia_secret_token_2026")
 EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "eruvia")
 
-# Configuración IA (Llama-3.3-70B via Hugging Face Router PRO)
+# Configuración IA (Meta Llama-3.3-70B via Hugging Face Router PRO)
 AI_BASE_URL = os.getenv("AI_BASE_URL", "https://router.huggingface.co/v1").rstrip("/")
 AI_API_KEY = os.getenv("AI_API_KEY", "")
 AI_MODEL = os.getenv("AI_MODEL", "meta-llama/Llama-3.3-70B-Instruct:together")
@@ -40,11 +41,17 @@ KNOWLEDGE_BASE = ""
 if KB_PATH.exists():
     KNOWLEDGE_BASE = KB_PATH.read_text(encoding="utf-8")
 
-# Memoria de conversación (últimos 6 mensajes por número)
+# Memoria de conversación compacta (últimos 4 mensajes)
 conversation_history: Dict[str, List[Dict[str, str]]] = {}
 
-# Set de números pausados manualmente
+# Set de números pausados
 paused_numbers: Dict[str, bool] = {}
+
+# Cache de deduplicación de eventos
+processed_message_ids: Dict[str, float] = {}
+
+# Bloqueo por usuario para evitar respuestas simultáneas desordenadas
+user_locks: Dict[str, asyncio.Lock] = {}
 
 app = FastAPI(title="Eruvia WhatsApp AI Bot & Admissions Agent")
 
@@ -59,21 +66,6 @@ def get_odoo_client():
         logger.error(f"Error conectando a Odoo: {e}")
         return None, None
 
-def check_human_intervention_needed(text: str) -> bool:
-    """Detecta si el mensaje del usuario pide expresamente hablar con un humano o asesor."""
-    patterns = [
-        r"\b(hablar con (un|una) persona|humano|asesor|agente)\b",
-        r"\b(atenci[oó]n humana|persona real|alguien real|llamada|ll[aá]menme)\b",
-        r"\b(quiero hablar con alguien|comunicarme con un asesor)\b",
-        r"\b(transferir|pasar con un asesor|asesor comercial)\b",
-        r"\b(/pausar|/humano)\b",
-        r"\b(talk to a human|speak to a person|human agent|advisor|call me|real person|agent)\b",
-        r"\b(falar com atendente|pessoa real|humano|consultor|me liga)\b",
-        r"\b(parler [aà] un humain|conseiller|personne r[eé]elle)\b"
-    ]
-    text_lower = text.lower()
-    return any(re.search(p, text_lower) for p in patterns)
-
 def is_lead_paused_in_odoo(phone: str) -> bool:
     """Verifica si en Odoo CRM el lead activo tiene etiqueta de pausa."""
     try:
@@ -87,53 +79,28 @@ def is_lead_paused_in_odoo(phone: str) -> bool:
 
         if lead_ids:
             lead = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "read", [lead_ids], {"fields": ["tag_ids"]})
-            if lead:
-                tags = lead[0].get("tag_ids", [])
-                if tags:
-                    tag_records = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.tag", "read", [tags], {"fields": ["name"]})
-                    for t in tag_records:
-                        name = t.get("name", "").lower()
-                        if "humano" in name or "pausa" in name or "asesor" in name or "human" in name:
-                            paused_numbers[phone] = True
-                            return True
+            if lead and lead[0].get("tag_ids"):
+                tags = lead[0]["tag_ids"]
+                tag_records = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.tag", "read", [tags], {"fields": ["name"]})
+                for t in tag_records:
+                    name = t.get("name", "").lower()
+                    if "humano" in name or "pausa" in name or "asesor" in name or "human" in name:
+                        paused_numbers[phone] = True
+                        return True
 
         paused_numbers[phone] = False
         return False
-    except Exception as e:
-        logger.error(f"Error verificando estado de pausa en Odoo: {e}")
+    except Exception:
         return False
 
-def set_human_intervention_in_odoo(phone: str, sender_name: str, lead_id: int):
-    """Marca la oportunidad en Odoo con etiqueta de Intervención Humana."""
-    try:
-        uid, models = get_odoo_client()
-        if not uid or not lead_id:
-            return
-
-        paused_numbers[phone] = True
-
-        tag_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.tag", "search", [[("name", "ilike", "Intervención Humana")]], {"limit": 1})
-        if not tag_ids:
-            tag_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.tag", "create", [{"name": "Intervención Humana", "color": 1}])
-        else:
-            tag_id = tag_ids[0]
-
-        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "write", [[lead_id], {
-            "priority": "3",
-            "tag_ids": [(4, tag_id)]
-        }])
-    except Exception as e:
-        logger.error(f"Error marcando intervención humana en Odoo: {e}")
-
 def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply: bool = False) -> Optional[int]:
-    """Busca o crea el contacto y la oportunidad en Odoo CRM y registra el mensaje en el chatter."""
+    """Sincroniza mensaje en el Chatter de Odoo CRM."""
     try:
         uid, models = get_odoo_client()
         if not uid:
             return None
 
         clean_phone = re.sub(r"[^\d+]", "", phone)
-        
         domain = ["|", ("phone", "ilike", clean_phone[-8:]), ("mobile", "ilike", clean_phone[-8:])]
         partner_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "search", [domain], {"limit": 1})
         
@@ -184,62 +151,60 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
         logger.error(f"Error sincronizando con Odoo: {e}")
         return None
 
-# Cache simple de deduplicación de eventos repetidos
-processed_message_ids: Dict[str, float] = {}
-
 async def generate_ai_reply(phone: str, user_message: str) -> str:
-    """Genera una respuesta inteligente y consultiva utilizando Llama-3.3-70B con fallback automático."""
+    """Genera una respuesta rápida, concisa y en el idioma del usuario con Llama 3.3 70B."""
     client = OpenAI(base_url=AI_BASE_URL, api_key=AI_API_KEY)
     
-    system_prompt = f"""Eres el Asesor Académico y de Admisiones oficial de Eruvia European Business School (Your AI Native Business School, miembro de ANCYPEL).
+    system_prompt = f"""Eres el Asesor Académico oficial de Eruvia European Business School (Your AI Native Business School, miembro oficial de ANCYPEL).
 
-BASE DE CONOCIMIENTO OFICIAL DE ERUVIA:
-{KNOWLEDGE_BASE}
+DATOS CLAVE DEL MBA EN INTELIGENCIA ARTIFICIAL:
+- Título Propio Europeo 100% online y flexible a tu propio ritmo (9 meses).
+- Acreditación oficial ANCYPEL.
+- Innovación: Tutor de IA Dedicado 24/7 + feedback docente diario + Masterclasses en vivo en HD.
+- Precio: 799 € promocional (precio regular: 999 €) o 6 cuotas de 133,17 €/mes sin intereses.
+- Garantía: 14 días de satisfacción con devolución del 100%.
+- Inscripción y web oficial: https://eruviabs.com/es
 
-ESTILO Y COMPORTAMIENTO:
-1. CONVERSACIONAL Y CONSULTIVO: Conversa de forma cálida, profesional, empática e inspiradora. Responde directamente la duda del alumno y haz una pregunta abierta para conocerlo mejor.
-2. MULTILINGÜE: Responde siempre en el MISMO idioma que use el usuario (Español, Inglés, Portugués, Francés, etc.).
-3. FORMATO WHATSAPP CONCISO: Respuestas claras, persuasivas y directas (1-2 párrafos o viñetas cortas). NO listes los 10 módulos completos a menos que el usuario pregunte específicamente por el temario detallado.
-4. ARGUMENTOS DE VALOR: Explica por qué el MBA en Inteligencia Artificial de Eruvia transforma carreras (Tutor de IA Dedicado 24/7, acreditación ANCYPEL, 100% online asíncrono, 9 meses, 799 € o 6 cuotas de 133,17 €, 14 días de garantía incondicional con devolución del 100%).
-5. GUÍA AL SIGUIENTE PASO: Invita cordialmente al alumno a matricularse en la web oficial (https://eruviabs.com/es) o a resolver cualquier duda sobre temario o financiación.
+REGLAS DE RESPUESTA:
+1. IDIOMA: Responde SIEMPRE en el MISMO idioma exacto en el que te escribe el usuario (Español, Inglés, Polaco, Portugués, Francés, etc.).
+2. CONCISO Y DIRECTO: Responde de forma amable, clara y breve (máximo 2 a 3 frases o viñetas muy cortas).
+3. NATURAL: No repitas mensajes largos ni listes todos los módulos a menos que te lo pidan específicamente.
+4. CIERRE: Termina con una pregunta breve y abierta para ayudar al alumno a avanzar.
 """
-    history = conversation_history.get(phone, [])
+    history = conversation_history.get(phone, [])[-4:]
     messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": user_message}]
 
-    models_to_try = [
+    models = [
         AI_MODEL,
-        "meta-llama/Llama-3.1-70B-Instruct",
-        "Qwen/Qwen2.5-72B-Instruct"
+        "Qwen/Qwen2.5-72B-Instruct",
+        "meta-llama/Llama-3.1-8B-Instruct"
     ]
 
-    for model_name in models_to_try:
+    for model_name in models:
         try:
             response = client.chat.completions.create(
                 model=model_name,
                 messages=messages,
                 temperature=0.7,
-                max_tokens=600
+                max_tokens=220
             )
-            msg_obj = response.choices[0].message
-            reply = (msg_obj.content or "").strip()
-            if not reply and hasattr(msg_obj, "reasoning_content") and msg_obj.reasoning_content:
-                reply = msg_obj.reasoning_content.strip()
-
+            reply = (response.choices[0].message.content or "").strip()
             if reply:
                 history.append({"role": "user", "content": user_message})
                 history.append({"role": "assistant", "content": reply})
-                conversation_history[phone] = history[-6:]
+                conversation_history[phone] = history[-4:]
                 return reply
         except Exception as e:
-            logger.warning(f"Error con modelo {model_name}: {e}. Probando fallback si aplica...")
+            logger.warning(f"Fallo temporal con {model_name}: {e}. Probando respaldo...")
 
     return (
-        "¡Hola! 👋 Qué gusto saludarte. Soy el asesor de admisiones de Eruvia European Business School.\n\n"
-        "¿En qué te puedo ayudar hoy? ¿Te gustaría conocer más sobre el contenido y metodología de nuestro MBA en Inteligencia Artificial o sobre las opciones de financiación?"
+        "¡Hola! 👋 Soy el asesor de admisiones de Eruvia European Business School.\n\n"
+        "Nuestro MBA en Inteligencia Artificial es 100% online (9 meses) con título avalado por ANCYPEL por 799 € o 6 cuotas de 133,17 €.\n\n"
+        "¿Te gustaría conocer las facilidades de inscripción o el temario?"
     )
 
 async def send_whatsapp_message(number: str, text: str):
-    """Envía un mensaje de texto a través de Evolution API con control de logs."""
+    """Envía un mensaje a través de Evolution API."""
     url = f"{EVOLUTION_URL}/message/sendText/{EVOLUTION_INSTANCE}"
     headers = {
         "apikey": EVOLUTION_API_KEY,
@@ -257,14 +222,14 @@ async def send_whatsapp_message(number: str, text: str):
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code in [200, 201]:
-                logger.info(f"Mensaje enviado con éxito a {number}. Status: {resp.status_code}")
+                logger.info(f"Mensaje entregado a {number}. Status: {resp.status_code}")
             else:
-                logger.error(f"Fallo enviando mensaje a {number}. Status: {resp.status_code}, Body: {resp.text}")
+                logger.error(f"Error enviando a {number}: {resp.status_code} - {resp.text}")
     except Exception as e:
-        logger.error(f"Error enviando mensaje por Evolution API: {e}", exc_info=True)
+        logger.error(f"Error en send_whatsapp_message: {e}")
 
 async def handle_single_message_data(payload: Dict[str, Any]):
-    """Procesa un objeto individual de mensaje recibido de WhatsApp directamente."""
+    """Procesa cada mensaje de WhatsApp de forma ordenada y simple."""
     try:
         key = payload.get("key", {})
         if key.get("fromMe", False):
@@ -275,11 +240,19 @@ async def handle_single_message_data(payload: Dict[str, Any]):
             return
 
         msg_id = key.get("id", "")
+        now = time.time()
+
+        # Deduplicación: ignorar reintentos idénticos del mismo mensaje en los últimos 3 minutos
         if msg_id:
-            now = time.time()
             if msg_id in processed_message_ids and (now - processed_message_ids[msg_id]) < 180:
                 return
             processed_message_ids[msg_id] = now
+
+        # Limpiar cache de IDs si supera 1000 elementos
+        if len(processed_message_ids) > 1000:
+            for k in list(processed_message_ids.keys())[:200]:
+                if now - processed_message_ids[k] > 180:
+                    processed_message_ids.pop(k, None)
 
         phone_number = remote_jid.split("@")[0]
         sender_name = payload.get("pushName", "")
@@ -299,42 +272,30 @@ async def handle_single_message_data(payload: Dict[str, Any]):
 
         logger.info(f"MENSAJE RECIBIDO DE {sender_name} ({remote_jid}): {user_text}")
 
-        # 1. Sincronizar mensaje entrante en Odoo CRM
-        lead_id = sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=user_text, is_bot_reply=False)
+        # Bloqueo secuencial por usuario para evitar respuestas simultáneas desordenadas
+        if remote_jid not in user_locks:
+            user_locks[remote_jid] = asyncio.Lock()
 
-        # 2. Comando para reactivar el bot si estaba pausado
-        if user_text.lower() in ["/activar", "/bot", "/iniciar", "menu", "/start"]:
-            paused_numbers[phone_number] = False
-            reactivate_msg = "¡Hola de nuevo! 👋 Asistente virtual de Eruvia reactivado. ¿En qué te puedo ayudar hoy sobre nuestro MBA o admisiones?"
-            await send_whatsapp_message(number=remote_jid, text=reactivate_msg)
-            sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=reactivate_msg, is_bot_reply=True)
-            return
+        async with user_locks[remote_jid]:
+            # 1. Registrar en Odoo CRM
+            sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=user_text, is_bot_reply=False)
 
-        # 3. Comprobar si el usuario solicita intervención humana por WhatsApp
-        if check_human_intervention_needed(user_text):
-            if lead_id:
-                set_human_intervention_in_odoo(phone_number, sender_name, lead_id)
-            pause_reply = "¡Entendido! He pausado mis respuestas automáticas y he notificado a nuestro equipo de admisiones. Un asesor humano de Eruvia revisará esta conversación y se comunicará contigo por aquí en breve. 👨‍💼✨"
-            await send_whatsapp_message(number=remote_jid, text=pause_reply)
-            sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=pause_reply, is_bot_reply=True)
-            return
+            # 2. Comprobar si la IA está pausada desde Odoo
+            if is_lead_paused_in_odoo(phone_number):
+                logger.info(f"IA Pausada para {phone_number} en Odoo CRM.")
+                return
 
-        # 4. Comprobar si la IA está pausada desde Odoo
-        if is_lead_paused_in_odoo(phone_number):
-            logger.info(f"Bot pausado para {phone_number} (Control humano activo en Odoo). Mensaje registrado en CRM.")
-            return
+            # 3. Generar respuesta rápida con IA
+            ai_reply = await generate_ai_reply(phone_number, user_text)
 
-        # 5. Generar respuesta con IA
-        ai_reply = await generate_ai_reply(phone_number, user_text)
+            # 4. Enviar a WhatsApp
+            await send_whatsapp_message(number=remote_jid, text=ai_reply)
 
-        # 6. Enviar respuesta por WhatsApp directamente al remote_jid
-        await send_whatsapp_message(number=remote_jid, text=ai_reply)
-
-        # 7. Registrar respuesta del Bot en el Chatter de Odoo
-        sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=ai_reply, is_bot_reply=True)
+            # 5. Registrar respuesta en Odoo CRM
+            sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=ai_reply, is_bot_reply=True)
 
     except Exception as e:
-        logger.error(f"Error procesando mensaje individual: {e}", exc_info=True)
+        logger.error(f"Error procesando mensaje: {e}", exc_info=True)
 
 async def process_incoming_message(data: Dict[str, Any]):
     """Procesa el webhook entrante desde Evolution API."""
@@ -357,18 +318,21 @@ async def process_incoming_message(data: Dict[str, Any]):
                 await handle_single_message_data(payload_data)
 
     except Exception as e:
-        logger.error(f"Error procesando webhook general: {e}", exc_info=True)
+        logger.error(f"Error en process_incoming_message: {e}", exc_info=True)
 
 @app.post("/webhook/evolution")
 async def evolution_webhook(request: Request, background_tasks: BackgroundTasks):
     """Endpoint receptor del webhook de Evolution API."""
-    data = await request.json()
-    background_tasks.add_task(process_incoming_message, data)
-    return {"status": "received"}
+    try:
+        data = await request.json()
+        background_tasks.add_task(process_incoming_message, data)
+        return {"status": "received"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 @app.get("/qr", response_class=HTMLResponse)
 async def view_qr_code():
-    """Muestra una página web corporativa con el código QR de WhatsApp listo para vincular."""
+    """Muestra la página con el código QR de WhatsApp."""
     url = f"{EVOLUTION_URL}/instance/connect/{EVOLUTION_INSTANCE}"
     headers = {"apikey": EVOLUTION_API_KEY}
     try:
