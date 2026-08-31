@@ -537,9 +537,9 @@ async def handle_single_message_data(payload: Dict[str, Any]):
 
         logger.info(f"MENSAJE ENTRANTE: {sender_name} (Phone: {phone_number}, JID: {routable_jid}): {user_text}")
 
-        # Guardar en caches de contacto
+        # Guardar en caches de contacto: usar raw_remote_jid para responder al chat activo en WhatsApp
         user_names_cache[phone_number] = sender_name
-        user_jids_cache[phone_number] = routable_jid
+        user_jids_cache[phone_number] = raw_remote_jid
 
         # 1. Sincronizar inmediatamente el mensaje en Odoo CRM con el número limpio
         sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=user_text, is_bot_reply=False)
