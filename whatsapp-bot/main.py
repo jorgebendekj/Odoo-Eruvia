@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import asyncio
 import logging
 import xmlrpc.client
 from typing import Dict, List, Any, Optional
@@ -50,6 +51,15 @@ paused_numbers: Dict[str, bool] = {}
 # Cache de deduplicación de mensajes (msg_id -> timestamp)
 processed_message_ids: Dict[str, float] = {}
 
+# Buffer de mensajes por usuario para debounce (acumular mensajes rápidos)
+user_message_buffers: Dict[str, List[str]] = {}
+user_debounce_tasks: Dict[str, asyncio.Task] = {}
+user_names_cache: Dict[str, str] = {}
+user_jids_cache: Dict[str, str] = {}
+
+# Tiempo de buffer/espera antes de responder (en segundos)
+DEBOUNCE_DELAY_SECONDS = 3.5
+
 app = FastAPI(title="Eruvia WhatsApp AI Bot & Admissions Agent")
 
 def get_odoo_client():
@@ -93,7 +103,6 @@ def is_lead_paused_in_odoo(phone: str) -> bool:
             return False
 
         clean_phone = re.sub(r"[^\d+]", "", phone)
-        # Dominio correcto en una sola lista
         lead_domain = ["|", ("phone", "ilike", clean_phone[-9:]), ("mobile", "ilike", clean_phone[-9:]), ("probability", "<", 100)]
         lead_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "search", [lead_domain], {"limit": 1})
 
@@ -137,8 +146,8 @@ def set_human_intervention_in_odoo(phone: str, sender_name: str, lead_id: int):
 
         alert_body = f"""
         <div style="background:#fee2e2;border-left:4px solid #ef4444;padding:12px;border-radius:6px;margin:8px 0;">
-            <p style="margin:0;color:#991b1b;font-weight:bold;font-size:14px;">🚨 ATENCIÓN REQUERIDA: Intervención Humana Solicitada</p>
-            <p style="margin:5px 0 0;color:#7f1d1d;font-size:13px;">El alumno <b>{sender_name or phone}</b> ha solicitado hablar con un asesor. Las respuestas automáticas de la IA han sido <b>PAUSADAS</b> para este contacto.</p>
+            <p style="margin:0;color:#991b1b;font-weight:bold;font-size:14px;">🚨 ATENCIÓN REQUERIDA: Intervención Humana Solicitada</>
+            <p style="margin:5px 0 0;color:#7f1d1d;font-size:13px;">El alumno <b>{sender_name or phone}</b> ha solicitado hablar con un asesor. Las respuestas automáticas de la IA han sido <b>PAUSADAS</b> para este contacto.</>
         </div>
         """
         models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "mail.message", "create", [{
@@ -243,6 +252,24 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
         logger.error(f"Error sincronizando con Odoo: {e}")
         return None
 
+async def send_typing_presence(number: str):
+    """Envía la presencia 'escribiendo...' a WhatsApp para que parezca natural."""
+    url = f"{EVOLUTION_URL}/chat/sendPresence/{EVOLUTION_INSTANCE}"
+    headers = {
+        "apikey": EVOLUTION_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "number": number,
+        "presence": "composing",
+        "delay": 2500
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(url, json=payload, headers=headers)
+    except Exception:
+        pass
+
 async def generate_ai_reply(phone: str, user_message: str) -> str:
     """Genera una respuesta inteligente, consultiva y con máxima eficiencia de tokens."""
     client = OpenAI(base_url=AI_BASE_URL, api_key=AI_API_KEY)
@@ -259,8 +286,9 @@ DATOS CLAVE:
 
 DIRECTRICES:
 1. Responde de forma empática, profesional, cercana y directa en el MISMO idioma del usuario.
-2. Formato conciso (1-2 párrafos cortos o viñetas limpias).
-3. Haz una pregunta de cierre para guiar al alumno.
+2. Si el usuario envió varios mensajes seguidos, responde a todas sus inquietudes en UNA SOLA respuesta clara y bien estructurada.
+3. Formato conciso (1-2 párrafos cortos o viñetas limpias).
+4. Haz una pregunta de cierre para guiar al alumno.
 """
     history = conversation_history.get(phone, [])[-4:]
     messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": user_message}]
@@ -289,8 +317,8 @@ DIRECTRICES:
             "¿En qué te puedo ayudar hoy? ¿Te gustaría conocer más sobre el contenido y metodología de nuestro MBA en Inteligencia Artificial o sobre las opciones de financiación?"
         )
 
-async def send_whatsapp_message(number: str, text: str):
-    """Envía un mensaje de texto a través de Evolution API."""
+async def send_whatsapp_message(number: str, text: str, delay_ms: int = 2500):
+    """Envía un mensaje de texto a través de Evolution API con delay de escritura humano."""
     url = f"{EVOLUTION_URL}/message/sendText/{EVOLUTION_INSTANCE}"
     headers = {
         "apikey": EVOLUTION_API_KEY,
@@ -300,7 +328,7 @@ async def send_whatsapp_message(number: str, text: str):
         "number": number,
         "text": text,
         "options": {
-            "delay": 1000,
+            "delay": delay_ms,
             "presence": "composing"
         }
     }
@@ -311,8 +339,74 @@ async def send_whatsapp_message(number: str, text: str):
     except Exception as e:
         logger.error(f"Error enviando mensaje por Evolution API: {e}")
 
+async def flush_user_buffer(phone_number: str):
+    """
+    Ejecuta el procesamiento diferido (buffer/debounce) para un usuario.
+    Espera el tiempo prudencial para agrupar todos los mensajes consecutivos del usuario,
+    genera UNA SOLA respuesta para todo el bloque y la envía con simulación humana.
+    """
+    try:
+        # Esperar la ventana de buffer (3.5 segundos) mientras el usuario escribe
+        await asyncio.sleep(DEBOUNCE_DELAY_SECONDS)
+
+        # Mostrar estado "Escribiendo..." en WhatsApp
+        remote_jid = user_jids_cache.get(phone_number, f"{phone_number}@s.whatsapp.net")
+        sender_name = user_names_cache.get(phone_number, "")
+        await send_typing_presence(remote_jid)
+
+        # Extraer y limpiar todos los mensajes acumulados en el buffer
+        messages = user_message_buffers.pop(phone_number, [])
+        if not messages:
+            return
+
+        combined_text = "\n".join(messages).strip()
+        logger.info(f"BUFFER CONSOLIDADO PARA {sender_name} ({phone_number}) [{len(messages)} mensajes]:\n{combined_text}")
+
+        # 1. Comando para reactivar el bot si estaba pausado
+        if any(m.lower().strip() in ["/activar", "/bot", "/iniciar", "menu", "/start"] for m in messages):
+            paused_numbers[phone_number] = False
+            lead_id = sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=combined_text, is_bot_reply=False)
+            if lead_id:
+                remove_human_intervention_in_odoo(phone_number, lead_id)
+            reactivate_msg = "¡Hola de nuevo! 👋 Asistente virtual de Eruvia reactivado. ¿En qué te puedo ayudar hoy sobre nuestro MBA o admisiones?"
+            await send_whatsapp_message(number=remote_jid, text=reactivate_msg, delay_ms=1500)
+            sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=reactivate_msg, is_bot_reply=True)
+            return
+
+        # 2. Comprobar si el usuario solicita intervención humana
+        if check_human_intervention_needed(combined_text):
+            lead_id = sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=combined_text, is_bot_reply=False)
+            if lead_id:
+                set_human_intervention_in_odoo(phone_number, sender_name, lead_id)
+            pause_reply = "¡Entendido! He pausado mis respuestas automáticas y he notificado a nuestro equipo de admisiones. Un asesor humano de Eruvia revisará esta conversación y se comunicará contigo por aquí en breve. 👨‍💼✨"
+            await send_whatsapp_message(number=remote_jid, text=pause_reply, delay_ms=1500)
+            sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=pause_reply, is_bot_reply=True)
+            return
+
+        # 3. Comprobar si la IA está pausada desde Odoo
+        if is_lead_paused_in_odoo(phone_number):
+            logger.info(f"Bot pausado para {phone_number} (Control humano activo en Odoo). Mensajes registrados en CRM.")
+            return
+
+        # 4. Generar UNA ÚNICA respuesta inteligente para todo el bloque de mensajes
+        ai_reply = await generate_ai_reply(phone_number, combined_text)
+
+        # 5. Enviar respuesta por WhatsApp con delay natural de tipeo (2.5 segundos)
+        await send_whatsapp_message(number=remote_jid, text=ai_reply, delay_ms=2500)
+
+        # 6. Registrar respuesta del Bot en el Chatter de Odoo
+        sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=ai_reply, is_bot_reply=True)
+
+    except asyncio.CancelledError:
+        # Tarea cancelada porque llegó un nuevo mensaje consecutivo que resetea el timer
+        pass
+    except Exception as e:
+        logger.error(f"Error procesando buffer de mensajes para {phone_number}: {e}", exc_info=True)
+    finally:
+        user_debounce_tasks.pop(phone_number, None)
+
 async def handle_single_message_data(payload: Dict[str, Any]):
-    """Procesa un objeto individual de mensaje recibido de WhatsApp con deduplicación estricta."""
+    """Procesa un objeto individual de mensaje recibido de WhatsApp con deduplicación y buffer inteligente."""
     try:
         key = payload.get("key", {})
         
@@ -327,7 +421,7 @@ async def handle_single_message_data(payload: Dict[str, Any]):
         msg_id = key.get("id", "")
         now = time.time()
 
-        # 🛑 DEDUPLICACIÓN ESTRICTA: Si este mensaje ya se procesó en los últimos 5 minutos, ignorar
+        # 🛑 DEDUPLICACIÓN ESTRICTA: Si este id de mensaje ya se procesó en los últimos 5 minutos, ignorar
         if msg_id:
             if msg_id in processed_message_ids and (now - processed_message_ids[msg_id]) < 300:
                 logger.info(f"Mensaje duplicado ignorado (msg_id={msg_id})")
@@ -356,46 +450,30 @@ async def handle_single_message_data(payload: Dict[str, Any]):
         if not user_text:
             return
 
-        logger.info(f"MENSAJE PROCESADO: {sender_name} ({phone_number}): {user_text}")
+        logger.info(f"MENSAJE ENTRANTE: {sender_name} ({phone_number}): {user_text}")
 
-        # 1. Sincronizar mensaje entrante en Odoo CRM
-        lead_id = sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=user_text, is_bot_reply=False)
+        # Guardar en caches de contacto
+        user_names_cache[phone_number] = sender_name
+        user_jids_cache[phone_number] = remote_jid
 
-        # 2. Comando para reactivar el bot si estaba pausado
-        if user_text.lower() in ["/activar", "/bot", "/iniciar", "menu", "/start"]:
-            paused_numbers[phone_number] = False
-            if lead_id:
-                remove_human_intervention_in_odoo(phone_number, lead_id)
-            reactivate_msg = "¡Hola de nuevo! 👋 Asistente virtual de Eruvia reactivado. ¿En qué te puedo ayudar hoy sobre nuestro MBA o admisiones?"
-            await send_whatsapp_message(number=remote_jid, text=reactivate_msg)
-            sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=reactivate_msg, is_bot_reply=True)
-            return
+        # 1. Sincronizar inmediatamente el mensaje en Odoo CRM (para que el chatter tenga todos los mensajes)
+        sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=user_text, is_bot_reply=False)
 
-        # 3. Comprobar si el usuario solicita intervención humana por WhatsApp
-        if check_human_intervention_needed(user_text):
-            if lead_id:
-                set_human_intervention_in_odoo(phone_number, sender_name, lead_id)
-            pause_reply = "¡Entendido! He pausado mis respuestas automáticas y he notificado a nuestro equipo de admisiones. Un asesor humano de Eruvia revisará esta conversación y se comunicará contigo por aquí en breve. 👨‍💼✨"
-            await send_whatsapp_message(number=remote_jid, text=pause_reply)
-            sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=pause_reply, is_bot_reply=True)
-            return
+        # 2. Agregar mensaje al buffer del usuario
+        if phone_number not in user_message_buffers:
+            user_message_buffers[phone_number] = []
+        user_message_buffers[phone_number].append(user_text)
 
-        # 4. Comprobar si la IA está pausada desde Odoo (por etiqueta en CRM)
-        if is_lead_paused_in_odoo(phone_number):
-            logger.info(f"Bot pausado para {phone_number} (Control humano activo en Odoo). Mensaje registrado en CRM.")
-            return
+        # 3. Cancelar timer previo si el usuario sigue escribiendo (debounce)
+        if phone_number in user_debounce_tasks and not user_debounce_tasks[phone_number].done():
+            user_debounce_tasks[phone_number].cancel()
 
-        # 5. Generar respuesta con IA eficiente
-        ai_reply = await generate_ai_reply(phone_number, user_text)
-
-        # 6. Enviar respuesta por WhatsApp
-        await send_whatsapp_message(number=remote_jid, text=ai_reply)
-
-        # 7. Registrar respuesta del Bot en el Chatter de Odoo
-        sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=ai_reply, is_bot_reply=True)
+        # 4. Iniciar nuevo temporizador de buffer (3.5 segundos)
+        task = asyncio.create_task(flush_user_buffer(phone_number))
+        user_debounce_tasks[phone_number] = task
 
     except Exception as e:
-        logger.error(f"Error procesando mensaje individual: {e}", exc_info=True)
+        logger.error(f"Error en handle_single_message_data: {e}", exc_info=True)
 
 async def process_incoming_message(data: Dict[str, Any]):
     """Procesa el webhook entrante desde Evolution API soportando todas las estructuras."""
