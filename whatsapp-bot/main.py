@@ -5,7 +5,7 @@ import time
 import asyncio
 import logging
 import xmlrpc.client
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -57,6 +57,9 @@ user_debounce_tasks: Dict[str, asyncio.Task] = {}
 user_names_cache: Dict[str, str] = {}
 user_jids_cache: Dict[str, str] = {}
 
+# Cache de mapeo de LID de WhatsApp a número telefónico real (LID -> (phone, real_jid))
+lid_to_real_map: Dict[str, Tuple[str, str]] = {}
+
 # Tiempo de buffer/espera antes de responder (en segundos)
 DEBOUNCE_DELAY_SECONDS = 3.5
 
@@ -72,6 +75,71 @@ def get_odoo_client():
     except Exception as e:
         logger.error(f"Error conectando a Odoo: {e}")
         return None, None
+
+async def resolve_real_phone_and_jid(remote_jid: str, push_name: str) -> Tuple[str, str]:
+    """
+    Resuelve el número de teléfono real y el JID enrutable de WhatsApp.
+    Si el mensaje llega con un identificador de dispositivo privado (@lid), busca el
+    contacto correspondiente con @s.whatsapp.net para no guardar IDs raros en Odoo.
+    """
+    if remote_jid.endswith("@s.whatsapp.net"):
+        phone = remote_jid.split("@")[0]
+        return phone, remote_jid
+
+    if remote_jid in lid_to_real_map:
+        return lid_to_real_map[remote_jid]
+
+    try:
+        url = f"{EVOLUTION_URL}/chat/findContacts/{EVOLUTION_INSTANCE}"
+        headers = {"apikey": EVOLUTION_API_KEY}
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(url, headers=headers, json={})
+            if resp.status_code == 200:
+                contacts = resp.json()
+                pic_map = {}
+                name_map = {}
+                lid_target = None
+
+                for c in contacts:
+                    c_jid = c.get("remoteJid", "")
+                    c_pic = c.get("profilePicUrl")
+                    c_name = c.get("pushName")
+                    
+                    if c_jid.endswith("@s.whatsapp.net"):
+                        c_phone = c_jid.split("@")[0]
+                        if c_pic:
+                            pic_map[c_pic] = (c_phone, c_jid)
+                        if c_name:
+                            name_map[c_name.lower().strip()] = (c_phone, c_jid)
+                    elif c_jid == remote_jid:
+                        lid_target = c
+
+                if lid_target:
+                    t_pic = lid_target.get("profilePicUrl")
+                    t_name = (lid_target.get("pushName") or push_name or "").lower().strip()
+                    
+                    if t_pic and t_pic in pic_map:
+                        lid_to_real_map[remote_jid] = pic_map[t_pic]
+                        logger.info(f"LID {remote_jid} resuelto por foto a {pic_map[t_pic]}")
+                        return pic_map[t_pic]
+                    
+                    if t_name and t_name in name_map:
+                        lid_to_real_map[remote_jid] = name_map[t_name]
+                        logger.info(f"LID {remote_jid} resuelto por nombre a {name_map[t_name]}")
+                        return name_map[t_name]
+
+                # Búsqueda directa por pushName
+                if push_name and push_name.lower().strip() in name_map:
+                    resolved = name_map[push_name.lower().strip()]
+                    lid_to_real_map[remote_jid] = resolved
+                    return resolved
+
+    except Exception as e:
+        logger.error(f"Error resolviendo LID {remote_jid}: {e}")
+
+    # Fallback si no se pudo resolver
+    clean_phone = remote_jid.split("@")[0]
+    return clean_phone, remote_jid
 
 def check_human_intervention_needed(text: str) -> bool:
     """Detecta si el mensaje del usuario pide expresamente hablar con un humano o asesor en varios idiomas."""
@@ -103,7 +171,7 @@ def is_lead_paused_in_odoo(phone: str) -> bool:
             return False
 
         clean_phone = re.sub(r"[^\d+]", "", phone)
-        lead_domain = ["|", ("phone", "ilike", clean_phone[-9:]), ("mobile", "ilike", clean_phone[-9:]), ("probability", "<", 100)]
+        lead_domain = ["|", ("phone", "ilike", clean_phone[-8:]), ("mobile", "ilike", clean_phone[-8:]), ("probability", "<", 100)]
         lead_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "search", [lead_domain], {"limit": 1})
 
         if lead_ids:
@@ -146,7 +214,7 @@ def set_human_intervention_in_odoo(phone: str, sender_name: str, lead_id: int):
 
         alert_body = f"""
         <div style="background:#fee2e2;border-left:4px solid #ef4444;padding:12px;border-radius:6px;margin:8px 0;">
-            <p style="margin:0;color:#991b1b;font-weight:bold;font-size:14px;">🚨 ATENCIÓN REQUERIDA: Intervención Humana Solicitada</>
+            <p style="margin:0;color:#991b1b;font-weight:bold;font-size:14px;">🚨 ATENCIÓN REQUERIDA: Intervención Humana Solicitada</p>
             <p style="margin:5px 0 0;color:#7f1d1d;font-size:13px;">El alumno <b>{sender_name or phone}</b> ha solicitado hablar con un asesor. Las respuestas automáticas de la IA han sido <b>PAUSADAS</b> para este contacto.</>
         </div>
         """
@@ -190,7 +258,7 @@ def remove_human_intervention_in_odoo(phone: str, lead_id: int):
 def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply: bool = False) -> Optional[int]:
     """
     Busca o crea el contacto y la oportunidad en Odoo CRM,
-    y registra el mensaje en el chatter.
+    y registra el mensaje en el chatter con números de teléfono limpios.
     """
     try:
         uid, models = get_odoo_client()
@@ -200,17 +268,20 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
 
         clean_phone = re.sub(r"[^\d+]", "", phone)
         
-        domain = ["|", ("phone", "ilike", clean_phone[-9:]), ("mobile", "ilike", clean_phone[-9:])]
+        domain = ["|", ("phone", "ilike", clean_phone[-8:]), ("mobile", "ilike", clean_phone[-8:])]
         partner_ids = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "search", [domain], {"limit": 1})
         
         if partner_ids:
             partner_id = partner_ids[0]
+            # Si el partner ya existe pero el nombre era un número genérico, actualizarlo con el pushName real
+            if sender_name:
+                models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "write", [[partner_id], {"name": sender_name}])
         else:
-            partner_name = sender_name if sender_name else f"Prospecto WhatsApp {clean_phone}"
+            partner_name = sender_name if sender_name else f"Prospecto WhatsApp +{clean_phone}"
             partner_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "create", [{
                 "name": partner_name,
-                "phone": clean_phone,
-                "mobile": clean_phone,
+                "phone": f"+{clean_phone}",
+                "mobile": f"+{clean_phone}",
                 "comment": "Contacto generado automáticamente por el Asistente Multilingüe de WhatsApp de Eruvia."
             }])
             logger.info(f"Nuevo contacto creado en Odoo: ID {partner_id} ({partner_name})")
@@ -225,12 +296,13 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
         if lead_ids:
             lead_id = lead_ids[0]
         else:
-            lead_title = f"WhatsApp: {sender_name or clean_phone} - Interés Máster Eruvia"
+            display_title = sender_name if sender_name else f"+{clean_phone}"
+            lead_title = f"WhatsApp: {display_title} - Interés Máster Eruvia"
             lead_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "create", [{
                 "name": lead_title,
                 "partner_id": partner_id,
-                "contact_name": sender_name or clean_phone,
-                "phone": clean_phone,
+                "contact_name": sender_name or f"+{clean_phone}",
+                "phone": f"+{clean_phone}",
                 "type": "opportunity",
                 "expected_revenue": 799.0,
                 "description": f"Primer mensaje recibido por WhatsApp:\n\n{message_text}"
@@ -343,15 +415,16 @@ async def flush_user_buffer(phone_number: str):
     """
     Ejecuta el procesamiento diferido (buffer/debounce) para un usuario.
     Espera el tiempo prudencial para agrupar todos los mensajes consecutivos del usuario,
-    genera UNA SOLA respuesta para todo el bloque y la envía con simulación humana.
+    genera UNA SOLA respuesta para todo el bloque y la envía al JID real.
     """
     try:
         # Esperar la ventana de buffer (3.5 segundos) mientras el usuario escribe
         await asyncio.sleep(DEBOUNCE_DELAY_SECONDS)
 
-        # Mostrar estado "Escribiendo..." en WhatsApp
         remote_jid = user_jids_cache.get(phone_number, f"{phone_number}@s.whatsapp.net")
         sender_name = user_names_cache.get(phone_number, "")
+        
+        # Mostrar estado "Escribiendo..." en WhatsApp
         await send_typing_presence(remote_jid)
 
         # Extraer y limpiar todos los mensajes acumulados en el buffer
@@ -360,7 +433,7 @@ async def flush_user_buffer(phone_number: str):
             return
 
         combined_text = "\n".join(messages).strip()
-        logger.info(f"BUFFER CONSOLIDADO PARA {sender_name} ({phone_number}) [{len(messages)} mensajes]:\n{combined_text}")
+        logger.info(f"BUFFER CONSOLIDADO PARA {sender_name} ({phone_number} -> {remote_jid}) [{len(messages)} mensajes]:\n{combined_text}")
 
         # 1. Comando para reactivar el bot si estaba pausado
         if any(m.lower().strip() in ["/activar", "/bot", "/iniciar", "menu", "/start"] for m in messages):
@@ -391,14 +464,13 @@ async def flush_user_buffer(phone_number: str):
         # 4. Generar UNA ÚNICA respuesta inteligente para todo el bloque de mensajes
         ai_reply = await generate_ai_reply(phone_number, combined_text)
 
-        # 5. Enviar respuesta por WhatsApp con delay natural de tipeo (2.5 segundos)
+        # 5. Enviar respuesta por WhatsApp con delay natural de tipeo (2.5 segundos) al JID correcto
         await send_whatsapp_message(number=remote_jid, text=ai_reply, delay_ms=2500)
 
         # 6. Registrar respuesta del Bot en el Chatter de Odoo
         sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=ai_reply, is_bot_reply=True)
 
     except asyncio.CancelledError:
-        # Tarea cancelada porque llegó un nuevo mensaje consecutivo que resetea el timer
         pass
     except Exception as e:
         logger.error(f"Error procesando buffer de mensajes para {phone_number}: {e}", exc_info=True)
@@ -406,7 +478,7 @@ async def flush_user_buffer(phone_number: str):
         user_debounce_tasks.pop(phone_number, None)
 
 async def handle_single_message_data(payload: Dict[str, Any]):
-    """Procesa un objeto individual de mensaje recibido de WhatsApp con deduplicación y buffer inteligente."""
+    """Procesa un objeto individual de mensaje recibido de WhatsApp con resolución precisa de número y LID."""
     try:
         key = payload.get("key", {})
         
@@ -414,8 +486,8 @@ async def handle_single_message_data(payload: Dict[str, Any]):
         if key.get("fromMe", False):
             return
 
-        remote_jid = key.get("remoteJid", "")
-        if not remote_jid or "@g.us" in remote_jid: # Ignorar grupos
+        raw_remote_jid = key.get("remoteJid", "")
+        if not raw_remote_jid or "@g.us" in raw_remote_jid: # Ignorar grupos
             return
 
         msg_id = key.get("id", "")
@@ -445,8 +517,10 @@ async def handle_single_message_data(payload: Dict[str, Any]):
                 if now - processed_message_ids[k] > 300:
                     processed_message_ids.pop(k, None)
 
-        phone_number = remote_jid.split("@")[0]
         sender_name = payload.get("pushName", "")
+        
+        # 🔑 RESOLVER NÚMERO DE TELÉFONO REAL Y JID ENRUTABLE (Soluciona @lid y nombres raros en Odoo)
+        phone_number, routable_jid = await resolve_real_phone_and_jid(raw_remote_jid, sender_name)
         
         msg_content = payload.get("message", {})
         user_text = (
@@ -461,13 +535,13 @@ async def handle_single_message_data(payload: Dict[str, Any]):
         if not user_text:
             return
 
-        logger.info(f"MENSAJE ENTRANTE: {sender_name} ({phone_number}): {user_text}")
+        logger.info(f"MENSAJE ENTRANTE: {sender_name} (Phone: {phone_number}, JID: {routable_jid}): {user_text}")
 
         # Guardar en caches de contacto
         user_names_cache[phone_number] = sender_name
-        user_jids_cache[phone_number] = remote_jid
+        user_jids_cache[phone_number] = routable_jid
 
-        # 1. Sincronizar inmediatamente el mensaje en Odoo CRM (para que el chatter tenga todos los mensajes)
+        # 1. Sincronizar inmediatamente el mensaje en Odoo CRM con el número limpio
         sync_with_odoo(phone=phone_number, sender_name=sender_name, message_text=user_text, is_bot_reply=False)
 
         # 2. Agregar mensaje al buffer del usuario
