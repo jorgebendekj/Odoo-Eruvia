@@ -107,7 +107,7 @@ services:
       - ODOO_URL=http://odoo:8069
       - ODOO_DB=eruvia
       - ODOO_USERNAME=info@eruviabs.com
-      - ODOO_PASSWORD=Eruvia2026!
+      - ODOO_PASSWORD=Eruvia2026
       - EVOLUTION_URL=http://evolution_api:8080
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-eruvia_secret_token_2026}
       - EVOLUTION_INSTANCE=eruvia
@@ -135,7 +135,7 @@ services:
       - ODOO_URL=http://odoo:8069
       - ODOO_DB=eruvia
       - ODOO_USERNAME=info@eruviabs.com
-      - ODOO_PASSWORD=Eruvia2026!
+      - ODOO_PASSWORD=Eruvia2026
     depends_on:
       - odoo
     networks:

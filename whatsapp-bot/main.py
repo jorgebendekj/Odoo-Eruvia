@@ -23,7 +23,7 @@ logger = logging.getLogger("eruvia_whatsapp_bot")
 ODOO_URL = os.getenv("ODOO_URL", "http://odoo:8069").rstrip("/")
 ODOO_DB = os.getenv("ODOO_DB", "eruvia")
 ODOO_USERNAME = os.getenv("ODOO_USERNAME", "info@eruviabs.com")
-ODOO_PASSWORD = os.getenv("ODOO_PASSWORD", "Eruvia2026!")
+ODOO_PASSWORD = os.getenv("ODOO_PASSWORD", "Eruvia2026")
 
 # Configuración Evolution API
 EVOLUTION_URL = os.getenv("EVOLUTION_URL", "http://evolution_api:8080").rstrip("/")
