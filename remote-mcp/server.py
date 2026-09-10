@@ -20,7 +20,7 @@ OAUTH_TOKENS: Dict[str, Dict[str, Any]] = {}
 
 # ContextVars por petición para soportar multi-usuario dinámico
 current_user_email = contextvars.ContextVar("current_user_email", default="info@eruviabs.com")
-current_user_password = contextvars.ContextVar("current_user_password", default="Eruvia2026!")
+current_user_password = contextvars.ContextVar("current_user_password", default="Eruvia2026")
 
 # Servidor Oficial FastMCP de Anthropic con host 0.0.0.0 y puerto 8000
 mcp = FastMCP(
