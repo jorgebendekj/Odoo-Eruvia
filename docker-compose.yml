@@ -111,9 +111,9 @@ services:
       - EVOLUTION_URL=http://evolution_api:8080
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-eruvia_secret_token_2026}
       - EVOLUTION_INSTANCE=eruvia
-      - AI_BASE_URL=${AI_BASE_URL:-https://api.moonshot.cn/v1}
+      - AI_BASE_URL=${AI_BASE_URL:-https://router.huggingface.co/v1}
       - AI_API_KEY=${AI_API_KEY}
-      - AI_MODEL=${AI_MODEL:-moonshot-v1-8k}
+      - AI_MODEL=${AI_MODEL:-meta-llama/Llama-3.3-70B-Instruct:together}
     depends_on:
       - odoo
       - evolution_api
