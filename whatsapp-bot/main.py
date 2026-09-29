@@ -132,7 +132,7 @@ def sync_with_odoo(phone: str, sender_name: str, message_text: str, is_bot_reply
                 "contact_name": sender_name or clean_phone,
                 "phone": f"+{clean_phone}",
                 "type": "opportunity",
-                "expected_revenue": 999.0,
+                "expected_revenue": 2500.0,
                 "description": f"Primer mensaje recibido por WhatsApp:\n\n{message_text}"
             }])
 
@@ -161,16 +161,18 @@ DATOS CLAVE DEL MBA EN INTELIGENCIA ARTIFICIAL:
 - Título Propio Europeo 100% online y flexible a tu propio ritmo (60 ECTS, 9 meses).
 - Acreditación Oficial: Acreditado formalmente por UTAMED Universidad e institución miembro oficial de ANCYPEL (desde 1977).
 - Innovación: Tutor de IA Dedicado 24/7 + feedback docente diario + Masterclasses en vivo en HD.
-- Precio Oficial: 999 € al contado (pago único) o financiado en 6 cuotas de 199,80 €/mes sin intereses (total 1.198,80 €) mediante Stripe.
+- Precio Oficial de Lista: 2.500 €.
+- Fondo de Becas al Talento: Los estudiantes pueden aplicar a becas de hasta el 60% de descuento según su perfil profesional y motivación, además de facilidades de pago en cuotas mensuales sin intereses mediante Stripe.
 - Garantía: 14 días incondicional con devolución del 100% (info@eruviabs.com).
 - Requisitos: No se requiere saber programar ni conocimientos técnicos previos.
-- Inscripción y web oficial: https://eruviabs.com/es
+- Postulación a Becas y Web Oficial: https://eruviabs.com/es
 
 REGLAS DE RESPUESTA:
 1. IDIOMA: Responde SIEMPRE en el MISMO idioma exacto en el que te escribe el usuario (Español, Inglés, Polaco, Portugués, Francés, etc.).
-2. CONCISO Y DIRECTO: Responde de forma amable, clara y breve (máximo 2 a 3 frases o viñetas muy cortas).
-3. NATURAL: No repitas mensajes largos ni listes todos los módulos a menos que te lo pidan específicamente.
-4. CIERRE: Termina con una pregunta breve y abierta o invitando a inscribirse en la web oficial (https://eruviabs.com/es).
+2. ENFOQUE COMERCIAL Y PRECIO: Si preguntan por el costo o matrícula, menciona el precio oficial (2.500 €) e informa inmediatamente sobre la oportunidad de postular a becas de hasta el 60% de descuento y facilidades de pago en cuotas sin intereses.
+3. CONCISO Y DIRECTO: Responde de forma amable, clara y breve (máximo 2 a 3 frases o viñetas muy cortas).
+4. NATURAL: No repitas mensajes largos ni listes todos los módulos a menos que te lo pidan específicamente.
+5. CIERRE: Termina con una pregunta breve sobre sus objetivos profesionales o invitando a postular a la beca en https://eruviabs.com/es.
 """
     history = conversation_history.get(phone, [])[-4:]
     messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": user_message}]
@@ -200,8 +202,8 @@ REGLAS DE RESPUESTA:
 
     return (
         "¡Hola! 👋 Soy el asesor de admisiones de Eruvia European Business School.\n\n"
-        "Nuestro MBA en Inteligencia Artificial es 100% online (60 ECTS, 9 meses) acreditado por UTAMED Universidad y ANCYPEL. Matrícula: 999 € al contado o 6 cuotas de 199,80 €/mes.\n\n"
-        "¿Te gustaría conocer los detalles de inscripción en https://eruviabs.com/es o el temario?"
+        "Nuestro MBA en Inteligencia Artificial es 100% online (60 ECTS, 9 meses) acreditado por UTAMED Universidad y ANCYPEL. La matrícula oficial es de 2.500 €, pero contamos con un Fondo de Becas de hasta el 60% de descuento y facilidades de pago en cuotas sin intereses.\n\n"
+        "¿Te gustaría conocer los requisitos para postular a la beca o ver el temario en https://eruviabs.com/es?"
     )
 
 async def send_whatsapp_message(number: str, text: str):
