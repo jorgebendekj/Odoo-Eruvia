@@ -418,7 +418,7 @@ async def oauth_token(request: Request):
     elif refresh_token and refresh_token in OAUTH_TOKENS:
         auth_info = OAUTH_TOKENS[refresh_token]
     else:
-        auth_info = {"email": "info@eruviabs.com", "password": "Eruvia2026!", "uid": 6}
+        auth_info = {"email": "info@eruviabs.com", "password": "Eruvia2026", "uid": 6}
 
     access_token = f"eruvia_tok_{secrets.token_hex(24)}"
     new_refresh_token = f"eruvia_ref_{secrets.token_hex(24)}"
